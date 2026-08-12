@@ -1,16 +1,27 @@
 """
 IgrzyskaMC.PL - Discord Bot
-Moduły: Tickety, Centrum Pomocy, Ankiety, Propozycje, Błędy
+Moduły: Tickety (ze zdjęciami), Centrum Pomocy (ze zdjęciami), Ankiety, Propozycje,
+        Błędy, Powitania, Konkursy/Giveaway'e, Ogłoszenia
 
 Wymagane zmienne środowiskowe:
   DISCORD_TOKEN   - token bota
   TEST_GUILD_ID   - (opcjonalnie) ID serwera do natychmiastowej synchronizacji komend
+
+=== JAK TO DZIAŁA (skrót) ===
+- Propozycje: ustaw kanał (/konfiguracja kanal Propozycje). Każda wiadomość napisana na tym
+  kanale (tekst i/lub zdjęcie) zamienia się automatycznie w kartę propozycji z reakcjami 👍/👎.
+  Można też skorzystać z przycisku "Napisz swoją propozycję" (/propozycje panel) - to samo,
+  tylko przez okienko (bez zdjęcia, bo Discord nie pozwala dodawać zdjęć w oknach/modalach).
+- Ankiety: ustaw kanał (/konfiguracja kanal Ankiety). Każda wiadomość na tym kanale zamienia
+  się w ankietę tak/nie - liczbę głosów pokazują natywne reakcje ✅ / ❌ Discorda.
+- Wszystko (propozycje, błędy, ankiety, ogłoszenia, konkursy) da się edytować i usuwać
+  komendami staffu/adminów - patrz /pomoc.
 """
 
 import os
 import io
-import json
 import re
+import json
 import random
 import asyncio
 import datetime
@@ -36,6 +47,13 @@ DEFAULT_CONFIG = {
         "ankiety": 0xFEE75C,
         "pomoc": 0x5865F2,
         "tickety": 0x5865F2,
+        "powitanie": 0x57F287,
+        "konkursy": 0x57F287,
+    },
+
+    "obrazki": {
+        "powitanie": "",
+        "konkursy": "",
     },
 
     "kanaly": {
@@ -47,25 +65,32 @@ DEFAULT_CONFIG = {
         "ankiety": 0,
         "bledy": 0,
         "ogloszenia": 0,
+        "powitania": 0,
+        "konkursy": 0,
     },
 
     "role": {
         "staff": 0,
         "powiadomienia_propozycje": 0,
         "powiadomienia_bledy": 0,
-        "tag_propozycje": 0,
-        "tag_bledy": 0,
-        "tag_centrum_pomocy": 0,
-        "tag_ankiety": 0,
-        "tag_ogloszenia": 0,
     },
 
-    "liczniki": {"propozycja": 0, "blad": 0, "ankieta": 0, "ticket": 0, "faq": 0},
+    "liczniki": {
+        "propozycja": 0, "blad": 0, "ankieta": 0, "ticket": 0,
+        "faq": 0, "ogloszenie": 0, "konkurs": 0,
+    },
+
+    "powitanie_tresc": (
+        "» **Hejka {mention}!** Miło Cię tu widzieć, rozgość się!\n"
+        "» Jesteś naszym **{ilosc}** członkiem na serwerze."
+    ),
 
     "propozycje_dane": {},
     "bledy_dane": {},
     "ankiety_dane": {},
     "tickety_dane": {},
+    "ogloszenia_dane": {},
+    "konkursy_dane": {},
     "faq": [],
 }
 
@@ -95,6 +120,11 @@ def save_config():
         json.dump(CONFIG, f, ensure_ascii=False, indent=2)
 
 
+class SafeDict(dict):
+    def __missing__(self, key):
+        return "{" + key + "}"
+
+
 # ========================
 #   BOT
 # ========================
@@ -109,11 +139,11 @@ TEST_GUILD_ID = int(os.getenv("TEST_GUILD_ID", "0"))
 
 
 def is_admin(interaction: discord.Interaction) -> bool:
-    return interaction.user.guild_permissions.administrator
+    return bool(interaction.user.guild_permissions.administrator)
 
 
 def is_staff(interaction: discord.Interaction) -> bool:
-    if interaction.user.guild_permissions.administrator:
+    if is_admin(interaction):
         return True
     rola_id = CONFIG["role"].get("staff")
     if rola_id:
@@ -123,38 +153,10 @@ def is_staff(interaction: discord.Interaction) -> bool:
     return False
 
 
-# ========================
-#   POMOCNICZE / DESIGN
-# ========================
-
 def nastepne_id(klucz: str) -> str:
     CONFIG["liczniki"][klucz] = CONFIG["liczniki"].get(klucz, 0) + 1
     save_config()
     return str(CONFIG["liczniki"][klucz])
-
-
-def karta(tytul: str, opis: str, kolor: int, stopka: Optional[str] = None) -> discord.Embed:
-    """Buduje standardową 'kartę' (embed) w stylu zamówionym przez klienta - kolorowy pasek,
-    pogrubiony tytuł, treść, stopka z copyrightem i datą."""
-    embed = discord.Embed(title=tytul, description=opis, color=kolor)
-    nazwa = CONFIG.get("nazwa_serwera", "Bot")
-    rok = datetime.datetime.now().year
-    embed.set_footer(text=stopka or f"🎮 Copyright {nazwa} - {rok}")
-    embed.timestamp = datetime.datetime.now(datetime.timezone.utc)
-    return embed
-
-
-async def wyslij_tag(kanal: discord.TextChannel, sekcja: str, rola_klucz: str):
-    """Wysyła małą 'etykietkę' nad kartą. Jeśli ustawiono rolę-tag, użyje jej wzmianki
-    (niebieska 'pigułka' bez realnego pingowania); w przeciwnym razie zwykły pogrubiony tekst."""
-    rola_id = CONFIG["role"].get(rola_klucz)
-    if rola_id:
-        rola = kanal.guild.get_role(rola_id)
-        if rola:
-            await kanal.send(content=f"{rola.mention} • {sekcja}",
-                              allowed_mentions=discord.AllowedMentions(roles=False))
-            return
-    await kanal.send(content=f"**• {sekcja}**")
 
 
 DLUGOSC_JEDNOSTKI = {"d": "days", "h": "hours", "m": "minutes", "s": "seconds"}
@@ -172,6 +174,96 @@ def parsuj_czas(tekst: str) -> Optional[datetime.timedelta]:
     return delta if delta.total_seconds() > 0 else None
 
 
+def forma_osob(ilosc: int) -> str:
+    if ilosc == 1:
+        return "osoba"
+    if 2 <= ilosc % 10 <= 4 and not (12 <= ilosc % 100 <= 14):
+        return "osoby"
+    return "osób"
+
+
+def znajdz_obrazek(message: discord.Message) -> Optional[str]:
+    """Zwraca URL pierwszego załączonego zdjęcia w wiadomości (jeśli jest)."""
+    for zal in message.attachments:
+        if zal.content_type and zal.content_type.startswith("image/"):
+            return zal.url
+        if zal.filename.lower().endswith((".png", ".jpg", ".jpeg", ".gif", ".webp")):
+            return zal.url
+    return None
+
+
+# ========================
+#   DESIGN (wygląd kart - nagłówek w bloku kodu + szare "cytowanie" treści,
+#   dokładnie w stylu bota-wzoru)
+# ========================
+
+def header_text(sekcja: str) -> discord.ui.TextDisplay:
+    nazwa = CONFIG.get("nazwa_serwera", "Bot").upper()
+    return discord.ui.TextDisplay(f"```\n🎮 {nazwa} X {sekcja.upper()}\n```")
+
+
+def cytuj(tekst: str) -> str:
+    linie = []
+    for linia in tekst.split("\n"):
+        linie.append(f"> {linia}" if linia.strip() else "")
+    return "\n".join(linie)
+
+
+def get_kolor(typ: str) -> discord.Color:
+    wartosc = CONFIG["kolory"].get(typ, 0x5865F2)
+    return discord.Color(wartosc)
+
+
+def footer_line(sekcja: str) -> str:
+    rok = datetime.datetime.now().year
+    nazwa = CONFIG.get("nazwa_serwera", "Bot")
+    return f"-# © {rok} {nazwa} x {sekcja}"
+
+
+class PanelView(discord.ui.LayoutView):
+    """Generyczna 'karta' w stylu bota-wzoru: nagłówek w ramce, treść cytowana szarą kreską,
+    opcjonalny obrazek, opcjonalne przyciski/select w tej samej ramce, stopka z copyrightem."""
+
+    def __init__(self, sekcja: str, opis: str, typ_koloru: str = "pomoc",
+                 items: Optional[List[discord.ui.Item]] = None,
+                 obrazek_url: Optional[str] = None):
+        super().__init__(timeout=None)
+
+        dzieci: List[discord.ui.Item] = [header_text(sekcja), discord.ui.Separator(),
+                                          discord.ui.TextDisplay(cytuj(opis))]
+
+        if obrazek_url:
+            dzieci.append(discord.ui.Separator())
+            dzieci.append(discord.ui.MediaGallery(discord.MediaGalleryItem(obrazek_url)))
+
+        if items:
+            dzieci.append(discord.ui.Separator())
+            dzieci.append(discord.ui.ActionRow(*items))
+
+        dzieci.append(discord.ui.Separator(spacing=discord.SeparatorSpacing.small))
+        dzieci.append(discord.ui.TextDisplay(footer_line(sekcja)))
+
+        self.container = discord.ui.Container(*dzieci, accent_color=get_kolor(typ_koloru))
+        self.add_item(self.container)
+
+
+async def wyslij_karte(kanal: discord.abc.Messageable, sekcja: str, opis: str,
+                        typ_koloru: str = "pomoc", obrazek_url: Optional[str] = None):
+    """Jednorazowa karta (np. wynik konkursu, zamknięcie ticketu) w tym samym stylu co panele."""
+    return await kanal.send(view=PanelView(sekcja, opis, typ_koloru, obrazek_url=obrazek_url))
+
+
+def karta(tytul: str, opis: str, kolor: int, stopka: Optional[str] = None) -> discord.Embed:
+    """Klasyczny embed w stylu 'ogłoszenia/changelogu' (kolorowy pasek z boku, pogrubiony
+    tytuł, stopka z copyrightem i datą) - używany tylko dla modułu Ogłoszeń."""
+    embed = discord.Embed(title=tytul, description=opis, color=kolor)
+    nazwa = CONFIG.get("nazwa_serwera", "Bot")
+    rok = datetime.datetime.now().year
+    embed.set_footer(text=stopka or f"🎮 Copyright {nazwa} - {rok}")
+    embed.timestamp = datetime.datetime.now(datetime.timezone.utc)
+    return embed
+
+
 # ========================
 #   PROPOZYCJE i BŁĘDY (wspólny system "zgłoszeń")
 # ========================
@@ -181,17 +273,17 @@ ZGLOSZENIA_TYPY = {
         "nazwa": "Propozycja", "sekcja": "Propozycje", "kolor": "propozycje",
         "emoji_przycisku": "💡", "etykieta_przycisku": "Napisz swoją propozycję",
         "magazyn": "propozycje_dane", "rola_powiadomien": "powiadomienia_propozycje",
-        "kanal": "propozycje", "tag_rola": "tag_propozycje",
-        "status_startowy": "Rozpatrywana", "reakcje": ["👍", "👎"],
-        "etykieta_tresc": "Treść propozycji", "stopka_dodatkowa": "Zagłosuj na tę propozycję za pomocą emotek niżej!",
+        "kanal": "propozycje", "status_startowy": "Rozpatrywana", "reakcje": ["👍", "👎"],
+        "etykieta_tresc": "Treść propozycji",
+        "stopka_dodatkowa": "Zagłosuj na tę propozycję za pomocą emotek niżej!",
     },
     "blad": {
         "nazwa": "Zgłoszenie błędu", "sekcja": "Błędy", "kolor": "bledy",
         "emoji_przycisku": "🐞", "etykieta_przycisku": "Zgłoś błąd",
         "magazyn": "bledy_dane", "rola_powiadomien": "powiadomienia_bledy",
-        "kanal": "bledy", "tag_rola": "tag_bledy",
-        "status_startowy": "Nowe zgłoszenie", "reakcje": [],
-        "etykieta_tresc": "Opis błędu (co się dzieje, jak to odtworzyć)", "stopka_dodatkowa": None,
+        "kanal": "bledy", "status_startowy": "Nowe zgłoszenie", "reakcje": [],
+        "etykieta_tresc": "Opis błędu (co się dzieje, jak to odtworzyć)",
+        "stopka_dodatkowa": None,
     },
 }
 
@@ -201,7 +293,8 @@ class ZgloszenieModal(discord.ui.Modal):
         dane = ZGLOSZENIA_TYPY[typ]
         super().__init__(title=f"Nowe: {dane['nazwa']}")
         self.typ = typ
-        self.tryb = discord.ui.TextInput(label="Na jaki tryb / serwer?", max_length=100, placeholder="np. SkyPvP")
+        self.tryb = discord.ui.TextInput(label="Na jaki tryb / serwer?", max_length=100,
+                                          placeholder="np. SkyPvP", required=False)
         self.tresc = discord.ui.TextInput(label=dane["etykieta_tresc"][:45],
                                            style=discord.TextStyle.paragraph, max_length=1000)
         self.add_item(self.tryb)
@@ -221,17 +314,19 @@ class ZgloszenieModal(discord.ui.Modal):
             "autor_nazwa": interaction.user.display_name,
             "tryb": self.tryb.value,
             "tresc": self.tresc.value,
+            "obrazek": None,
             "kanal_id": kanal.id,
             "message_id": 0,
             "status": dane["status_startowy"],
         }
         save_config()
 
-        await wyslij_tag(kanal, dane["sekcja"], dane["tag_rola"])
-        embed = build_zgloszenie_embed(self.typ, wpis_id)
-        wiadomosc = await kanal.send(embed=embed)
+        wiadomosc = await kanal.send(view=build_zgloszenie_panelview(self.typ, wpis_id))
         for reakcja in dane["reakcje"]:
-            await wiadomosc.add_reaction(reakcja)
+            try:
+                await wiadomosc.add_reaction(reakcja)
+            except discord.HTTPException:
+                pass
 
         CONFIG[dane["magazyn"]][wpis_id]["message_id"] = wiadomosc.id
         save_config()
@@ -246,14 +341,21 @@ class ZgloszenieModal(discord.ui.Modal):
         await interaction.response.send_message(f"✅ {dane['nazwa']} **#{wpis_id}** została wysłana na {kanal.mention}!", ephemeral=True)
 
 
-def build_zgloszenie_embed(typ: str, wpis_id: str) -> discord.Embed:
+def build_zgloszenie_panelview(typ: str, wpis_id: str) -> PanelView:
     dane = ZGLOSZENIA_TYPY[typ]
     wpis = CONFIG[dane["magazyn"]][wpis_id]
-    tytul = f"{dane['nazwa']} od: {wpis['autor_nazwa']}, na tryb: {wpis['tryb']}"
-    stopka = f"#{wpis_id} • Status: {wpis['status']}"
+
+    naglowek = f"**{dane['nazwa']} od: {wpis['autor_nazwa']}**"
+    if wpis.get("tryb"):
+        naglowek += f", na tryb: **{wpis['tryb']}**"
+
+    linie = [naglowek, "", wpis["tresc"] or "*(brak treści — dodano zdjęcie)*", ""]
     if dane["stopka_dodatkowa"]:
-        stopka = f"{dane['stopka_dodatkowa']} • {stopka}"
-    return karta(tytul, wpis["tresc"], CONFIG["kolory"][dane["kolor"]], stopka=stopka)
+        linie.append(f"*{dane['stopka_dodatkowa']}*")
+    linie.append(f"*Status: {wpis['status']} • #{wpis_id}*")
+    opis = "\n".join(linie)
+
+    return PanelView(dane["sekcja"], opis, dane["kolor"], obrazek_url=wpis.get("obrazek"))
 
 
 async def zmien_status_zgloszenia(bot_instance: commands.Bot, typ: str, wpis_id: str, nowy_status: str) -> bool:
@@ -267,13 +369,13 @@ async def zmien_status_zgloszenia(bot_instance: commands.Bot, typ: str, wpis_id:
     if kanal:
         try:
             wiadomosc = await kanal.fetch_message(wpis["message_id"])
-            await wiadomosc.edit(embed=build_zgloszenie_embed(typ, wpis_id))
+            await wiadomosc.edit(view=build_zgloszenie_panelview(typ, wpis_id))
         except (discord.NotFound, discord.Forbidden, discord.HTTPException):
             pass
     return True
 
 
-class ZgloszeniePanel(discord.ui.View):
+class ZgloszeniePanel(discord.ui.LayoutView):
     def __init__(self, typ: str):
         super().__init__(timeout=None)
         dane = ZGLOSZENIA_TYPY[typ]
@@ -283,47 +385,42 @@ class ZgloszeniePanel(discord.ui.View):
                                              style=discord.ButtonStyle.primary,
                                              custom_id=f"igrzyskamc:zgloszenie:{typ}:napisz")
         przycisk_napisz.callback = self.napisz
-        self.add_item(przycisk_napisz)
 
-        przycisk_powiadom = discord.ui.Button(label="Powiadamiaj o nowych", emoji="🔔",
-                                               style=discord.ButtonStyle.success,
-                                               custom_id=f"igrzyskamc:zgloszenie:{typ}:powiadom")
-        przycisk_powiadom.callback = self.powiadom
-        self.add_item(przycisk_powiadom)
+        opis = ("Masz pomysł na zmianę w grze? Kliknij przycisk niżej albo napisz od razu na tym "
+                "kanale (możesz dodać zdjęcie) - obie drogi trafiają w to samo miejsce!\n"
+                "Głosuj na propozycje innych reakcjami 👍/👎 pod każdym zgłoszeniem.") if typ == "propozycja" else (
+                "Znalazłeś błąd w grze lub na serwerze? Kliknij przycisk niżej i opisz co się dzieje - "
+                "im dokładniej, tym szybciej to naprawimy!")
+
+        items = [przycisk_napisz]
+
+        dzieci = [header_text(dane["sekcja"]), discord.ui.Separator(),
+                  discord.ui.TextDisplay(cytuj(opis)), discord.ui.Separator(),
+                  discord.ui.ActionRow(*items),
+                  discord.ui.Separator(spacing=discord.SeparatorSpacing.small),
+                  discord.ui.TextDisplay(footer_line(dane["sekcja"]))]
+        self.container = discord.ui.Container(*dzieci, accent_color=get_kolor(dane["kolor"]))
+        self.add_item(self.container)
 
     async def napisz(self, interaction: discord.Interaction):
         await interaction.response.send_modal(ZgloszenieModal(self.typ))
-
-    async def powiadom(self, interaction: discord.Interaction):
-        dane = ZGLOSZENIA_TYPY[self.typ]
-        rola_id = CONFIG["role"].get(dane["rola_powiadomien"])
-        if not rola_id:
-            await interaction.response.send_message("⚠️ Rola powiadomień nie jest jeszcze ustawiona przez administrację.", ephemeral=True)
-            return
-        rola = interaction.guild.get_role(rola_id)
-        if rola in interaction.user.roles:
-            await interaction.user.remove_roles(rola)
-            await interaction.response.send_message("🔕 Wyłączono powiadomienia.", ephemeral=True)
-        else:
-            await interaction.user.add_roles(rola)
-            await interaction.response.send_message("🔔 Włączono powiadomienia!", ephemeral=True)
 
 
 propozycje_group = app_commands.Group(name="propozycje", description="System propozycji od graczy")
 bledy_group = app_commands.Group(name="bledy", description="System zgłaszania błędów")
 
 
-@propozycje_group.command(name="panel", description="Wysyła panel propozycji na wskazany kanał")
-async def propozycje_panel(interaction: discord.Interaction, kanal: discord.TextChannel):
+@propozycje_group.command(name="panel", description="Wysyła panel propozycji (przycisk + info)")
+async def propozycje_panel(interaction: discord.Interaction, kanal: Optional[discord.TextChannel] = None):
     if not is_admin(interaction):
         await interaction.response.send_message("⚠️ Brak uprawnień.", ephemeral=True)
         return
-    embed = karta("💡 Propozycje",
-                   "Masz pomysł na zmianę w grze? Kliknij przycisk niżej i podziel się nim z nami!\n"
-                   "Głosuj na propozycje innych, klikając 👍 lub 👎 pod każdym zgłoszeniem.",
-                   CONFIG["kolory"]["propozycje"])
-    await kanal.send(embed=embed, view=ZgloszeniePanel("propozycja"))
-    await interaction.response.send_message(f"✅ Panel propozycji wysłany na {kanal.mention}.", ephemeral=True)
+    docelowy = kanal
+    if docelowy is None:
+        kanal_id = CONFIG["kanaly"].get("propozycje")
+        docelowy = interaction.guild.get_channel(kanal_id) if kanal_id else interaction.channel
+    await docelowy.send(view=ZgloszeniePanel("propozycja"))
+    await interaction.response.send_message(f"✅ Panel propozycji wysłany na {docelowy.mention}.", ephemeral=True)
 
 
 @propozycje_group.command(name="status", description="Zmienia status propozycji")
@@ -363,17 +460,17 @@ async def propozycje_usun(interaction: discord.Interaction, id: str):
     await interaction.response.send_message(f"✅ Usunięto propozycję **#{id}**.", ephemeral=True)
 
 
-@bledy_group.command(name="panel", description="Wysyła panel zgłaszania błędów na wskazany kanał")
-async def bledy_panel(interaction: discord.Interaction, kanal: discord.TextChannel):
+@bledy_group.command(name="panel", description="Wysyła panel zgłaszania błędów")
+async def bledy_panel(interaction: discord.Interaction, kanal: Optional[discord.TextChannel] = None):
     if not is_admin(interaction):
         await interaction.response.send_message("⚠️ Brak uprawnień.", ephemeral=True)
         return
-    embed = karta("🐞 Błędy",
-                   "Znalazłeś błąd w grze lub na serwerze? Kliknij przycisk niżej i opisz co się dzieje — "
-                   "im dokładniej, tym szybciej to naprawimy!",
-                   CONFIG["kolory"]["bledy"])
-    await kanal.send(embed=embed, view=ZgloszeniePanel("blad"))
-    await interaction.response.send_message(f"✅ Panel błędów wysłany na {kanal.mention}.", ephemeral=True)
+    docelowy = kanal
+    if docelowy is None:
+        kanal_id = CONFIG["kanaly"].get("bledy")
+        docelowy = interaction.guild.get_channel(kanal_id) if kanal_id else interaction.channel
+    await docelowy.send(view=ZgloszeniePanel("blad"))
+    await interaction.response.send_message(f"✅ Panel błędów wysłany na {docelowy.mention}.", ephemeral=True)
 
 
 @bledy_group.command(name="status", description="Zmienia status zgłoszenia błędu")
@@ -415,7 +512,137 @@ async def bledy_usun(interaction: discord.Interaction, id: str):
 
 
 # ========================
-#   CENTRUM POMOCY (FAQ)
+#   AUTOMATYCZNA ZAMIANA WIADOMOŚCI NA WYZNACZONYCH KANAŁACH
+#   (Propozycje i Ankiety - napisz na kanale, a bot zrobi z tego kartę)
+# ========================
+
+async def obsluz_wiadomosc_propozycji(message: discord.Message):
+    tresc = message.content.strip()
+    obrazek = znajdz_obrazek(message)
+    if not tresc and not obrazek:
+        try:
+            await message.delete()
+        except (discord.Forbidden, discord.NotFound):
+            pass
+        return
+
+    wpis_id = nastepne_id("propozycja")
+    CONFIG["propozycje_dane"][wpis_id] = {
+        "autor_id": message.author.id,
+        "autor_nazwa": message.author.display_name,
+        "tryb": "",
+        "tresc": tresc,
+        "obrazek": obrazek,
+        "kanal_id": message.channel.id,
+        "message_id": 0,
+        "status": ZGLOSZENIA_TYPY["propozycja"]["status_startowy"],
+    }
+    save_config()
+
+    try:
+        await message.delete()
+    except (discord.Forbidden, discord.NotFound):
+        pass
+
+    wiadomosc = await message.channel.send(view=build_zgloszenie_panelview("propozycja", wpis_id))
+    for reakcja in ZGLOSZENIA_TYPY["propozycja"]["reakcje"]:
+        try:
+            await wiadomosc.add_reaction(reakcja)
+        except discord.HTTPException:
+            pass
+
+    CONFIG["propozycje_dane"][wpis_id]["message_id"] = wiadomosc.id
+    save_config()
+
+    rola_id = CONFIG["role"].get("powiadomienia_propozycje")
+    if rola_id:
+        rola = message.guild.get_role(rola_id)
+        if rola:
+            await message.channel.send(f"🔔 {rola.mention} — nowa propozycja czeka!",
+                                        allowed_mentions=discord.AllowedMentions(roles=True))
+
+
+async def obsluz_wiadomosc_ankiety(message: discord.Message):
+    tresc = message.content.strip()
+    obrazek = znajdz_obrazek(message)
+    if not tresc and not obrazek:
+        try:
+            await message.delete()
+        except (discord.Forbidden, discord.NotFound):
+            pass
+        return
+
+    ankieta_id = nastepne_id("ankieta")
+    CONFIG["ankiety_dane"][ankieta_id] = {
+        "autor_id": message.author.id,
+        "autor_nazwa": message.author.display_name,
+        "pytanie": tresc,
+        "obrazek": obrazek,
+        "kanal_id": message.channel.id,
+        "message_id": 0,
+    }
+    save_config()
+
+    try:
+        await message.delete()
+    except (discord.Forbidden, discord.NotFound):
+        pass
+
+    linie = [f"**Pytanie od: {message.author.display_name}**", "",
+             tresc or "*(zdjęcie)*", "", "*Zagłosuj reakcją ✅ (Tak) lub ❌ (Nie) niżej!*",
+             f"*#{ankieta_id}*"]
+    opis = "\n".join(linie)
+    wiadomosc = await message.channel.send(view=PanelView("Ankiety", opis, "ankiety", obrazek_url=obrazek))
+    for reakcja in ("✅", "❌"):
+        try:
+            await wiadomosc.add_reaction(reakcja)
+        except discord.HTTPException:
+            pass
+
+    CONFIG["ankiety_dane"][ankieta_id]["message_id"] = wiadomosc.id
+    save_config()
+
+
+@bot.event
+async def on_message(message: discord.Message):
+    if message.author.bot or not message.guild:
+        return
+
+    kanal_propozycje = CONFIG["kanaly"].get("propozycje")
+    if kanal_propozycje and message.channel.id == kanal_propozycje:
+        await obsluz_wiadomosc_propozycji(message)
+        return
+
+    kanal_ankiety = CONFIG["kanaly"].get("ankiety")
+    if kanal_ankiety and message.channel.id == kanal_ankiety:
+        await obsluz_wiadomosc_ankiety(message)
+        return
+
+
+ankieta_group = app_commands.Group(name="ankieta", description="Zarządzanie ankietami")
+
+
+@ankieta_group.command(name="usun", description="Usuwa ankietę")
+async def ankieta_usun(interaction: discord.Interaction, id: str):
+    if not is_staff(interaction):
+        await interaction.response.send_message("⚠️ Brak uprawnień.", ephemeral=True)
+        return
+    wpis = CONFIG["ankiety_dane"].pop(id, None)
+    if not wpis:
+        await interaction.response.send_message("⚠️ Nie znaleziono ankiety o takim ID.", ephemeral=True)
+        return
+    save_config()
+    try:
+        kanal = interaction.guild.get_channel(wpis["kanal_id"])
+        wiadomosc = await kanal.fetch_message(wpis["message_id"])
+        await wiadomosc.delete()
+    except (discord.NotFound, discord.Forbidden, discord.HTTPException, AttributeError):
+        pass
+    await interaction.response.send_message(f"✅ Usunięto ankietę **#{id}**.", ephemeral=True)
+
+
+# ========================
+#   CENTRUM POMOCY (FAQ) - odpowiedzi mogą zawierać zdjęcie
 # ========================
 
 class CentrumPomocySelect(discord.ui.Select):
@@ -434,32 +661,44 @@ class CentrumPomocySelect(discord.ui.Select):
         if not wpis:
             await interaction.response.send_message("⚠️ Nie znaleziono tego wpisu (mógł zostać usunięty).", ephemeral=True)
             return
-        embed = karta(f"❓ {wpis['pytanie']}", wpis["odpowiedz"], CONFIG["kolory"]["pomoc"])
-        await interaction.response.send_message(embed=embed, ephemeral=True)
+        opis = f"**{wpis['pytanie']}**\n\n{wpis['odpowiedz']}"
+        await interaction.response.send_message(
+            view=PanelView("Centrum Pomocy", opis, "pomoc", obrazek_url=wpis.get("obrazek") or None),
+            ephemeral=True)
 
 
-class CentrumPomocyPanel(discord.ui.View):
+class CentrumPomocyPanel(discord.ui.LayoutView):
     def __init__(self):
         super().__init__(timeout=None)
-        self.add_item(CentrumPomocySelect())
+        opis = ("Masz pytanie? Wybierz temat z listy niżej, a od razu dostaniesz odpowiedź - "
+                "zanim zrobisz ticket, sprawdź może jest tu już gotowa odpowiedź!")
+        dzieci = [header_text("Centrum Pomocy"), discord.ui.Separator(),
+                  discord.ui.TextDisplay(cytuj(opis)), discord.ui.Separator(),
+                  discord.ui.ActionRow(CentrumPomocySelect()),
+                  discord.ui.Separator(spacing=discord.SeparatorSpacing.small),
+                  discord.ui.TextDisplay(footer_line("Centrum Pomocy"))]
+        self.container = discord.ui.Container(*dzieci, accent_color=get_kolor("pomoc"))
+        self.add_item(self.container)
 
 
 centrumpomocy_group = app_commands.Group(name="centrumpomocy", description="Centrum Pomocy (FAQ)")
 
 
 @centrumpomocy_group.command(name="dodaj", description="Dodaje wpis do Centrum Pomocy")
-async def cp_dodaj(interaction: discord.Interaction, pytanie: str, odpowiedz: str):
+@app_commands.describe(obrazek="Opcjonalnie: link do zdjęcia dołączonego do odpowiedzi")
+async def cp_dodaj(interaction: discord.Interaction, pytanie: str, odpowiedz: str, obrazek: Optional[str] = None):
     if not is_admin(interaction):
         await interaction.response.send_message("⚠️ Brak uprawnień.", ephemeral=True)
         return
     nowy_id = nastepne_id("faq")
-    CONFIG["faq"].append({"id": nowy_id, "pytanie": pytanie, "odpowiedz": odpowiedz})
+    CONFIG["faq"].append({"id": nowy_id, "pytanie": pytanie, "odpowiedz": odpowiedz, "obrazek": obrazek or ""})
     save_config()
     await interaction.response.send_message(f"✅ Dodano wpis **#{nowy_id}**. Odśwież panel (`/centrumpomocy panel`), żeby pojawił się na liście.", ephemeral=True)
 
 
 @centrumpomocy_group.command(name="edytuj", description="Edytuje wpis w Centrum Pomocy")
-async def cp_edytuj(interaction: discord.Interaction, id: str, pytanie: str, odpowiedz: str):
+@app_commands.describe(obrazek="Opcjonalnie: nowy link do zdjęcia (zostaw puste, by nie zmieniać)")
+async def cp_edytuj(interaction: discord.Interaction, id: str, pytanie: str, odpowiedz: str, obrazek: Optional[str] = None):
     if not is_admin(interaction):
         await interaction.response.send_message("⚠️ Brak uprawnień.", ephemeral=True)
         return
@@ -469,6 +708,8 @@ async def cp_edytuj(interaction: discord.Interaction, id: str, pytanie: str, odp
         return
     wpis["pytanie"] = pytanie
     wpis["odpowiedz"] = odpowiedz
+    if obrazek is not None:
+        wpis["obrazek"] = obrazek
     save_config()
     await interaction.response.send_message(f"✅ Zaktualizowano wpis **#{id}**.", ephemeral=True)
 
@@ -497,17 +738,16 @@ async def cp_lista(interaction: discord.Interaction):
 
 
 @centrumpomocy_group.command(name="panel", description="Wysyła panel Centrum Pomocy na wskazany kanał")
-async def cp_panel(interaction: discord.Interaction, kanal: discord.TextChannel):
+async def cp_panel(interaction: discord.Interaction, kanal: Optional[discord.TextChannel] = None):
     if not is_admin(interaction):
         await interaction.response.send_message("⚠️ Brak uprawnień.", ephemeral=True)
         return
-    embed = karta("❓ Centrum Pomocy",
-                   "Masz pytanie? Wybierz temat z listy niżej, a od razu dostaniesz odpowiedź — "
-                   "zanim zrobisz ticket, sprawdź może jest tu już gotowa odpowiedź!",
-                   CONFIG["kolory"]["pomoc"])
-    await wyslij_tag(kanal, "Centrum Pomocy", "tag_centrum_pomocy")
-    await kanal.send(embed=embed, view=CentrumPomocyPanel())
-    await interaction.response.send_message(f"✅ Panel Centrum Pomocy wysłany na {kanal.mention}.", ephemeral=True)
+    docelowy = kanal
+    if docelowy is None:
+        kanal_id = CONFIG["kanaly"].get("centrum_pomocy")
+        docelowy = interaction.guild.get_channel(kanal_id) if kanal_id else interaction.channel
+    await docelowy.send(view=CentrumPomocyPanel())
+    await interaction.response.send_message(f"✅ Panel Centrum Pomocy wysłany na {docelowy.mention}.", ephemeral=True)
 
 
 @centrumpomocy_group.command(name="zasady", description="Wysyła informacje/zasady dot. Centrum Pomocy (godziny, regulamin, dozwolone programy)")
@@ -543,189 +783,32 @@ async def cp_zasady(interaction: discord.Interaction, godziny: str = "14.00-23.0
     programy_tekst = "\n".join(f"{i}. {p}" for i, p in enumerate(lista_programow, start=1))
     tickety_wzmianka = kanal_tickety.mention if kanal_tickety else "kanale ticketów"
 
-    tresc = (
-        f"# Informacje odnośnie centrum pomocy\n"
+    opis = (
         f"**Centrum pomocy działa w godzinach {godziny}**\n\n"
-        f"> **Zasady centrum pomocy**\n\n"
-        f"{zasady_tekst}\n\n"
-        f"> **Programy które są dozwolone podczas sprawdzania:**\n\n"
-        f"{programy_tekst}\n\n"
+        f"**Zasady centrum pomocy**\n{zasady_tekst}\n\n"
+        f"**Programy które są dozwolone podczas sprawdzania:**\n{programy_tekst}\n\n"
         f"Jeżeli administrator poprosi was o pobranie innego programu, należy zgłosić to na {tickety_wzmianka}"
     )
 
-    await docelowy.send(tresc)
+    await docelowy.send(view=PanelView("Informacje o Centrum Pomocy", opis, "pomoc"))
     await interaction.response.send_message(f"✅ Wysłano zasady Centrum Pomocy na {docelowy.mention}.", ephemeral=True)
 
 
 # ========================
-#   ANKIETY
-# ========================
-
-def forma_glosow(ilosc: int) -> str:
-    if ilosc == 1:
-        return "głos"
-    if 2 <= ilosc % 10 <= 4 and not (12 <= ilosc % 100 <= 14):
-        return "głosy"
-    return "głosów"
-
-
-def build_ankieta_embed(ankieta_id: str) -> discord.Embed:
-    wpis = CONFIG["ankiety_dane"][ankieta_id]
-    glosy = wpis.get("glosy", {})
-    licznik = [0] * len(wpis["opcje"])
-    for indeks in glosy.values():
-        licznik[indeks] += 1
-    razem = sum(licznik) or 1
-
-    linie = []
-    for i, opcja in enumerate(wpis["opcje"]):
-        procent = round(licznik[i] / razem * 100)
-        pasek = "█" * (procent // 10) + "░" * (10 - procent // 10)
-        linie.append(f"**{opcja}**\n`{pasek}` {procent}% ({licznik[i]} {forma_glosow(licznik[i])})")
-    opis = "\n\n".join(linie)
-
-    if wpis.get("zakonczona"):
-        stopka = f"#{ankieta_id} • Ankieta zakończona • {sum(licznik)} {forma_glosow(sum(licznik))} łącznie"
-    elif wpis.get("koniec"):
-        stopka = f"#{ankieta_id} • Głosuj klikając przycisk! Koniec wkrótce"
-    else:
-        stopka = f"#{ankieta_id} • Głosuj klikając przycisk niżej!"
-
-    return karta(f"📊 {wpis['pytanie']}", opis, CONFIG["kolory"]["ankiety"], stopka=stopka)
-
-
-class AnkietaGlosujButton(discord.ui.Button):
-    def __init__(self, ankieta_id: str, indeks: int, etykieta: str, disabled: bool = False):
-        super().__init__(label=etykieta[:80], style=discord.ButtonStyle.secondary,
-                          custom_id=f"igrzyskamc:ankieta:{ankieta_id}:{indeks}", disabled=disabled)
-        self.ankieta_id = ankieta_id
-        self.indeks = indeks
-
-    async def callback(self, interaction: discord.Interaction):
-        wpis = CONFIG["ankiety_dane"].get(self.ankieta_id)
-        if not wpis or wpis.get("zakonczona"):
-            await interaction.response.send_message("⚠️ Ta ankieta już się zakończyła.", ephemeral=True)
-            return
-        glosy = wpis.setdefault("glosy", {})
-        glosy[str(interaction.user.id)] = self.indeks
-        save_config()
-        await interaction.response.send_message(f"✅ Twój głos: **{wpis['opcje'][self.indeks]}**", ephemeral=True)
-        try:
-            kanal = interaction.guild.get_channel(wpis["kanal_id"])
-            wiadomosc = await kanal.fetch_message(wpis["message_id"])
-            await wiadomosc.edit(embed=build_ankieta_embed(self.ankieta_id), view=build_ankieta_view(self.ankieta_id))
-        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
-            pass
-
-
-def build_ankieta_view(ankieta_id: str) -> discord.ui.View:
-    wpis = CONFIG["ankiety_dane"][ankieta_id]
-    widok = discord.ui.View(timeout=None)
-    for i, opcja in enumerate(wpis["opcje"]):
-        widok.add_item(AnkietaGlosujButton(ankieta_id, i, opcja, disabled=wpis.get("zakonczona", False)))
-    return widok
-
-
-async def zakoncz_ankiete(bot_instance: commands.Bot, ankieta_id: str):
-    wpis = CONFIG["ankiety_dane"].get(ankieta_id)
-    if not wpis or wpis.get("zakonczona"):
-        return
-    wpis["zakonczona"] = True
-    save_config()
-    kanal = bot_instance.get_channel(wpis["kanal_id"])
-    if kanal:
-        try:
-            wiadomosc = await kanal.fetch_message(wpis["message_id"])
-            await wiadomosc.edit(embed=build_ankieta_embed(ankieta_id), view=build_ankieta_view(ankieta_id))
-        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
-            pass
-
-
-@tasks.loop(seconds=30)
-async def sprawdzaj_ankiety():
-    teraz = datetime.datetime.now(datetime.timezone.utc).timestamp()
-    for ankieta_id, wpis in list(CONFIG["ankiety_dane"].items()):
-        if not wpis.get("zakonczona") and wpis.get("koniec") and wpis["koniec"] <= teraz:
-            await zakoncz_ankiete(bot, ankieta_id)
-
-
-ankieta_group = app_commands.Group(name="ankieta", description="System ankiet")
-
-
-@ankieta_group.command(name="stworz", description="Tworzy nową ankietę (2-5 opcji)")
-@app_commands.describe(pytanie="Treść pytania", opcja1="Opcja 1", opcja2="Opcja 2",
-                        opcja3="Opcja 3 (opcjonalnie)", opcja4="Opcja 4 (opcjonalnie)",
-                        opcja5="Opcja 5 (opcjonalnie)", czas="Czas trwania np. 1d, 12h (opcjonalnie - bez limitu jeśli puste)",
-                        kanal="Kanał docelowy (opcjonalnie)")
-async def ankieta_stworz(interaction: discord.Interaction, pytanie: str, opcja1: str, opcja2: str,
-                          opcja3: Optional[str] = None, opcja4: Optional[str] = None,
-                          opcja5: Optional[str] = None, czas: Optional[str] = None,
-                          kanal: Optional[discord.TextChannel] = None):
-    if not is_staff(interaction):
-        await interaction.response.send_message("⚠️ Brak uprawnień.", ephemeral=True)
-        return
-
-    opcje = [o for o in [opcja1, opcja2, opcja3, opcja4, opcja5] if o]
-    docelowy = kanal
-    if docelowy is None:
-        kanal_id = CONFIG["kanaly"].get("ankiety")
-        docelowy = interaction.guild.get_channel(kanal_id) if kanal_id else interaction.channel
-
-    koniec = None
-    if czas:
-        delta = parsuj_czas(czas)
-        if not delta:
-            await interaction.response.send_message("⚠️ Zły format czasu. Użyj np. `1d`, `12h`, `30m`.", ephemeral=True)
-            return
-        koniec = (datetime.datetime.now(datetime.timezone.utc) + delta).timestamp()
-
-    ankieta_id = nastepne_id("ankieta")
-    CONFIG["ankiety_dane"][ankieta_id] = {
-        "pytanie": pytanie, "opcje": opcje, "glosy": {}, "koniec": koniec,
-        "zakonczona": False, "kanal_id": docelowy.id, "message_id": 0,
-    }
-    save_config()
-
-    await wyslij_tag(docelowy, "Ankiety", "tag_ankiety")
-    embed = build_ankieta_embed(ankieta_id)
-    widok = build_ankieta_view(ankieta_id)
-    wiadomosc = await docelowy.send(embed=embed, view=widok)
-    CONFIG["ankiety_dane"][ankieta_id]["message_id"] = wiadomosc.id
-    save_config()
-    bot.add_view(widok, message_id=wiadomosc.id)
-
-    await interaction.response.send_message(f"✅ Utworzono ankietę **#{ankieta_id}** na {docelowy.mention}.", ephemeral=True)
-
-
-@ankieta_group.command(name="zakoncz", description="Kończy ankietę przed czasem")
-async def ankieta_zakoncz_cmd(interaction: discord.Interaction, id: str):
-    if not is_staff(interaction):
-        await interaction.response.send_message("⚠️ Brak uprawnień.", ephemeral=True)
-        return
-    if id not in CONFIG["ankiety_dane"]:
-        await interaction.response.send_message("⚠️ Nie znaleziono ankiety o takim ID.", ephemeral=True)
-        return
-    await zakoncz_ankiete(bot, id)
-    await interaction.response.send_message(f"✅ Zakończono ankietę **#{id}**.", ephemeral=True)
-
-
-# ========================
-#   TICKETY
+#   TICKETY (ze zdjęciami - załączniki działają w kanale ticketu jak w każdej
+#   zwykłej rozmowie na Discordzie, nie trzeba nic dodatkowo klikać)
 # ========================
 
 TICKET_KATEGORIE = ["Pomoc techniczna", "Zgłoszenie gracza", "Współpraca / Biznes", "Inne"]
 
 
-class TicketZamknijView(discord.ui.View):
-    def __init__(self, numer: str):
-        super().__init__(timeout=None)
+class ZamknijTicketButton(discord.ui.Button):
+    def __init__(self, numer: str, disabled: bool = False):
+        super().__init__(label="Zamknij ticket", emoji="🔒", style=discord.ButtonStyle.danger,
+                          custom_id=f"igrzyskamc:ticket:zamknij:{numer}", disabled=disabled)
         self.numer = numer
-        przycisk = discord.ui.Button(label="Zamknij ticket", emoji="🔒", style=discord.ButtonStyle.danger,
-                                      custom_id=f"igrzyskamc:ticket:zamknij:{numer}")
-        przycisk.callback = self.zamknij
-        self.add_item(przycisk)
 
-    async def zamknij(self, interaction: discord.Interaction):
+    async def callback(self, interaction: discord.Interaction):
         wpis = CONFIG["tickety_dane"].get(self.numer)
         if not wpis or wpis.get("zamkniety"):
             await interaction.response.send_message("⚠️ Ten ticket jest już zamknięty.", ephemeral=True)
@@ -748,17 +831,23 @@ class TicketZamknijView(discord.ui.View):
             log_kanal = interaction.guild.get_channel(log_id)
             if log_kanal:
                 plik = discord.File(io.BytesIO(transkrypt.encode("utf-8")), filename=f"ticket-{self.numer}.txt")
-                await log_kanal.send(
-                    embed=karta(f"🔒 Zamknięto ticket #{self.numer}",
-                                 f"Kategoria: {wpis['kategoria']}\nAutor: <@{wpis['autor_id']}>\n"
-                                 f"Zamknął: {interaction.user.mention}", CONFIG["kolory"]["tickety"]),
-                    file=plik)
+                opis = (f"Kategoria: {wpis['kategoria']}\nAutor: <@{wpis['autor_id']}>\n"
+                        f"Zamknął: {interaction.user.mention}")
+                await log_kanal.send(view=PanelView(f"Ticket #{self.numer} — Zamknięty", opis, "tickety"), file=plik)
 
         await asyncio.sleep(5)
         try:
             await interaction.channel.delete()
         except (discord.NotFound, discord.Forbidden):
             pass
+
+
+def build_ticket_panel(numer: str, kategoria: str, autor_id: int, zamkniety: bool = False) -> PanelView:
+    opis = (f"Witaj <@{autor_id}>! Opisz swój problem, a nasz zespół odezwie się najszybciej jak to możliwe.\n\n"
+            f"» Zanim napiszesz, sprawdź może odpowiedź jest już w Centrum Pomocy!\n"
+            f"» Możesz tu spokojnie wysyłać zdjęcia - po prostu dodaj załącznik do wiadomości.")
+    return PanelView(f"Ticket #{numer} — {kategoria}", opis, "tickety",
+                      items=[ZamknijTicketButton(numer, disabled=zamkniety)])
 
 
 class TicketySelect(discord.ui.Select):
@@ -777,14 +866,16 @@ class TicketySelect(discord.ui.Select):
 
         przeciazenia = {
             gildia.default_role: discord.PermissionOverwrite(view_channel=False),
-            interaction.user: discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True),
+            interaction.user: discord.PermissionOverwrite(view_channel=True, send_messages=True,
+                                                            attach_files=True, read_message_history=True),
             gildia.me: discord.PermissionOverwrite(view_channel=True, send_messages=True),
         }
         staff_id = CONFIG["role"].get("staff")
         if staff_id:
             staff_rola = gildia.get_role(staff_id)
             if staff_rola:
-                przeciazenia[staff_rola] = discord.PermissionOverwrite(view_channel=True, send_messages=True, read_message_history=True)
+                przeciazenia[staff_rola] = discord.PermissionOverwrite(view_channel=True, send_messages=True,
+                                                                        attach_files=True, read_message_history=True)
 
         try:
             kanal = await gildia.create_text_channel(
@@ -800,35 +891,421 @@ class TicketySelect(discord.ui.Select):
         }
         save_config()
 
-        embed = karta(f"🎫 Ticket #{numer} — {kategoria}",
-                       f"Witaj {interaction.user.mention}! Opisz swój problem, a nasz zespół odezwie się najszybciej jak to możliwe.\n\n"
-                       f"» Zanim napiszesz, sprawdź może odpowiedź jest już w Centrum Pomocy!",
-                       CONFIG["kolory"]["tickety"])
-        await kanal.send(content=interaction.user.mention, embed=embed, view=TicketZamknijView(numer))
-        bot.add_view(TicketZamknijView(numer))
+        widok = build_ticket_panel(numer, kategoria, interaction.user.id)
+        await kanal.send(content=interaction.user.mention, view=widok)
+        bot.add_view(widok)
         await interaction.response.send_message(f"✅ Utworzono ticket: {kanal.mention}", ephemeral=True)
 
 
-class TicketyPanel(discord.ui.View):
+class TicketyPanel(discord.ui.LayoutView):
     def __init__(self):
         super().__init__(timeout=None)
-        self.add_item(TicketySelect())
+        opis = ("Potrzebujesz pomocy? Wybierz kategorię z listy niżej, a utworzymy dla Ciebie prywatny "
+                "kanał widoczny tylko dla Ciebie i naszego zespołu. W ticketach możesz swobodnie wysyłać "
+                "zdjęcia i pliki.")
+        dzieci = [header_text("Centrum Ticketów"), discord.ui.Separator(),
+                  discord.ui.TextDisplay(cytuj(opis)), discord.ui.Separator(),
+                  discord.ui.ActionRow(TicketySelect()),
+                  discord.ui.Separator(spacing=discord.SeparatorSpacing.small),
+                  discord.ui.TextDisplay(footer_line("Centrum Ticketów"))]
+        self.container = discord.ui.Container(*dzieci, accent_color=get_kolor("tickety"))
+        self.add_item(self.container)
 
 
 tickety_group = app_commands.Group(name="tickety", description="System ticketów")
 
 
 @tickety_group.command(name="panel", description="Wysyła panel ticketów na wskazany kanał")
-async def tickety_panel_cmd(interaction: discord.Interaction, kanal: discord.TextChannel):
+async def tickety_panel_cmd(interaction: discord.Interaction, kanal: Optional[discord.TextChannel] = None):
     if not is_admin(interaction):
         await interaction.response.send_message("⚠️ Brak uprawnień.", ephemeral=True)
         return
-    embed = karta("🎫 Centrum Ticketów",
-                   "Potrzebujesz pomocy? Wybierz kategorię z listy niżej, a utworzymy dla Ciebie prywatny kanał "
-                   "widoczny tylko dla Ciebie i naszego zespołu.",
-                   CONFIG["kolory"]["tickety"])
-    await kanal.send(embed=embed, view=TicketyPanel())
-    await interaction.response.send_message(f"✅ Panel ticketów wysłany na {kanal.mention}.", ephemeral=True)
+    docelowy = kanal
+    if docelowy is None:
+        kanal_id = CONFIG["kanaly"].get("tickety_panel")
+        docelowy = interaction.guild.get_channel(kanal_id) if kanal_id else interaction.channel
+    await docelowy.send(view=TicketyPanel())
+    await interaction.response.send_message(f"✅ Panel ticketów wysłany na {docelowy.mention}.", ephemeral=True)
+
+
+# ========================
+#   POWITANIA
+# ========================
+
+@bot.event
+async def on_member_join(member: discord.Member):
+    kanal_id = CONFIG["kanaly"].get("powitania")
+    if not kanal_id:
+        return
+    kanal = member.guild.get_channel(kanal_id)
+    if not kanal:
+        return
+    ilosc = member.guild.member_count
+    tresc = CONFIG.get("powitanie_tresc", "Witaj {mention}!").format_map(
+        SafeDict(mention=member.mention, ilosc=ilosc, nazwa=member.display_name))
+    obrazek = CONFIG["obrazki"].get("powitanie") or None
+    view = PanelView("Powitanie", tresc, "powitanie", obrazek_url=obrazek)
+    try:
+        await kanal.send(content=member.mention, view=view)
+    except (discord.Forbidden, discord.HTTPException):
+        pass
+
+
+# ========================
+#   KONKURSY (GIVEAWAY'E)
+# ========================
+
+def konkurs_wpis(konkurs_id: str) -> Optional[dict]:
+    return CONFIG["konkursy_dane"].get(konkurs_id)
+
+
+class DolaczKonkursButton(discord.ui.Button):
+    def __init__(self, konkurs_id: str, disabled: bool = False):
+        super().__init__(label="Kliknij, aby dołączyć do konkursu!", style=discord.ButtonStyle.success,
+                          emoji="🎉", custom_id=f"igrzyskamc:konkurs:dolacz:{konkurs_id}", disabled=disabled)
+        self.konkurs_id = konkurs_id
+
+    async def callback(self, interaction: discord.Interaction):
+        wpis = konkurs_wpis(self.konkurs_id)
+        if not wpis or wpis.get("zakonczony"):
+            await interaction.response.send_message("⚠️ Ten konkurs już się zakończył.", ephemeral=True)
+            return
+
+        rola_id = wpis.get("wymagana_rola")
+        if rola_id:
+            rola = interaction.guild.get_role(rola_id)
+            if rola and rola not in interaction.user.roles:
+                await interaction.response.send_message(
+                    f"⚠️ Aby dołączyć do tego konkursu, musisz posiadać rolę {rola.mention}.", ephemeral=True)
+                return
+
+        uczestnicy = wpis.setdefault("uczestnicy", [])
+        if interaction.user.id in uczestnicy:
+            uczestnicy.remove(interaction.user.id)
+            save_config()
+            await interaction.response.send_message("↩️ Zrezygnowałeś/aś z udziału w konkursie.", ephemeral=True)
+        else:
+            uczestnicy.append(interaction.user.id)
+            save_config()
+            await interaction.response.send_message("🎉 Dołączono do konkursu! Powodzenia!", ephemeral=True)
+
+        try:
+            kanal = interaction.guild.get_channel(wpis["kanal_id"])
+            wiadomosc = await kanal.fetch_message(wpis["message_id"])
+            await wiadomosc.edit(view=build_konkurs_panel(self.konkurs_id))
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException, AttributeError):
+            pass
+
+
+class UczestnicyKonkursButton(discord.ui.Button):
+    """Nieklikalny przycisk-licznik pokazujący liczbę uczestników."""
+
+    def __init__(self, konkurs_id: str, ilosc: int):
+        super().__init__(label=f"W konkursie wzięło udział {ilosc} {forma_osob(ilosc)}!",
+                          style=discord.ButtonStyle.secondary, emoji="👥",
+                          custom_id=f"igrzyskamc:konkurs:licznik:{konkurs_id}", disabled=True)
+
+
+def build_konkurs_panel(konkurs_id: str) -> PanelView:
+    wpis = konkurs_wpis(konkurs_id)
+    ilosc_uczestnikow = len(wpis.get("uczestnicy", []))
+    koniec_ts = int(wpis["koniec"])
+    zakonczony = wpis.get("zakonczony", False)
+
+    linie = [
+        f"🎁 **Nagrodą w konkursie jest:** `{wpis['nagroda']}`",
+        f"👤 **Nagrodę może wygrać:** `{wpis['ilosc_zwyciezcow']} {forma_osob(wpis['ilosc_zwyciezcow'])}`",
+    ]
+    if zakonczony:
+        linie.append(f"🏛️ **Zakończono:** <t:{koniec_ts}:R> (<t:{koniec_ts}:F>)")
+    else:
+        linie.append(f"🏛️ **Koniec:** <t:{koniec_ts}:R> (<t:{koniec_ts}:F>)")
+    if wpis.get("wymagania"):
+        linie.append(f"» **Wymagania:** `{wpis['wymagania']}`")
+    if wpis.get("wymagana_rola"):
+        linie.append(f"🔒 **Wymagana rola:** <@&{wpis['wymagana_rola']}>")
+    linie.append(f"🧑‍🎤 **Organizator:** <@{wpis['host_id']}>")
+
+    if zakonczony:
+        zwyciezcy = wpis.get("zwyciezcy", [])
+        if zwyciezcy:
+            wzmianki = ", ".join(f"<@{uid}>" for uid in zwyciezcy)
+            linie.append(f"\n🏆 **Zwycięzca(y):** {wzmianki}")
+        else:
+            linie.append("\n🏆 **Zwycięzcy:** Brak (za mało uczestników).")
+
+    opis = "\n".join(linie)
+
+    dolacz = DolaczKonkursButton(konkurs_id, disabled=zakonczony)
+    licznik = UczestnicyKonkursButton(konkurs_id, ilosc_uczestnikow)
+    obrazek = CONFIG["obrazki"].get("konkursy") or None
+
+    return PanelView("Konkurs", opis, "konkursy", items=[dolacz, licznik], obrazek_url=obrazek)
+
+
+async def wylosuj_zwyciezcow(wpis: dict) -> List[int]:
+    uczestnicy = list(wpis.get("uczestnicy", []))
+    ile = min(wpis.get("ilosc_zwyciezcow", 1), len(uczestnicy))
+    if ile <= 0:
+        return []
+    return random.sample(uczestnicy, ile)
+
+
+async def zakoncz_konkurs(bot_instance: commands.Bot, konkurs_id: str, reroll: bool = False):
+    wpis = konkurs_wpis(konkurs_id)
+    if not wpis:
+        return None
+
+    zwyciezcy = await wylosuj_zwyciezcow(wpis)
+    wpis["zwyciezcy"] = zwyciezcy
+    wpis["zakonczony"] = True
+    save_config()
+
+    kanal = bot_instance.get_channel(wpis["kanal_id"])
+    if kanal:
+        try:
+            wiadomosc = await kanal.fetch_message(wpis["message_id"])
+            await wiadomosc.edit(view=build_konkurs_panel(konkurs_id))
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            pass
+
+        if zwyciezcy:
+            wzmianki = ", ".join(f"<@{uid}>" for uid in zwyciezcy)
+            naglowek = "🔄 Wylosowano ponownie" if reroll else "🎊 Konkurs zakończony"
+            tresc = (f"» **{naglowek}!** Gratulacje {wzmianki} — wygrywasz(cie) **{wpis['nagroda']}**!\n"
+                     f"» Skontaktuj się z organizatorem <@{wpis['host_id']}>, aby odebrać nagrodę.")
+            await wyslij_karte(kanal, "Konkurs — Wyniki", tresc, "konkursy")
+        else:
+            await wyslij_karte(kanal, "Konkurs — Wyniki",
+                                f"» Konkurs na **{wpis['nagroda']}** zakończył się bez zwycięzców "
+                                f"— za mało uczestników.", "bledy")
+    return zwyciezcy
+
+
+@tasks.loop(seconds=30)
+async def sprawdzaj_konkursy():
+    teraz = datetime.datetime.now(datetime.timezone.utc).timestamp()
+    for konkurs_id, wpis in list(CONFIG["konkursy_dane"].items()):
+        if not wpis.get("zakonczony") and wpis.get("koniec", 0) <= teraz:
+            await zakoncz_konkurs(bot, konkurs_id)
+
+
+konkurs_group = app_commands.Group(name="konkurs", description="Zarządzanie konkursami (giveaway'ami)")
+
+
+@konkurs_group.command(name="stworz", description="Tworzy nowy konkurs")
+@app_commands.describe(
+    nagroda="Co można wygrać, np. Ranga VIP",
+    zwyciezcy="Ile osób wygra konkurs",
+    czas="Czas trwania, np. 1d, 12h, 30m, 1d12h",
+    kanal="Kanał, na który wysłać konkurs (domyślnie ustawiony w /konfiguracja kanal)",
+    wymagania="Opcjonalny opis wymagań (informacyjny), np. 'zaproś 1 osobę'",
+    wymagana_rola="Opcjonalna rola wymagana, aby dołączyć",
+)
+async def konkurs_stworz(interaction: discord.Interaction, nagroda: str, zwyciezcy: int, czas: str,
+                          kanal: Optional[discord.TextChannel] = None, wymagania: Optional[str] = None,
+                          wymagana_rola: Optional[discord.Role] = None):
+    if not is_staff(interaction):
+        await interaction.response.send_message("⚠️ Brak uprawnień.", ephemeral=True)
+        return
+    if zwyciezcy < 1:
+        await interaction.response.send_message("⚠️ Liczba zwycięzców musi wynosić co najmniej 1.", ephemeral=True)
+        return
+
+    delta = parsuj_czas(czas)
+    if not delta:
+        await interaction.response.send_message(
+            "⚠️ Zły format czasu. Użyj np. `1d`, `12h`, `30m`, `1d12h30m`.", ephemeral=True)
+        return
+
+    docelowy_kanal = kanal
+    if docelowy_kanal is None:
+        kanal_id = CONFIG["kanaly"].get("konkursy")
+        docelowy_kanal = interaction.guild.get_channel(kanal_id) if kanal_id else interaction.channel
+    if docelowy_kanal is None:
+        await interaction.response.send_message("⚠️ Nie udało się ustalić kanału konkursu.", ephemeral=True)
+        return
+
+    koniec = datetime.datetime.now(datetime.timezone.utc) + delta
+    konkurs_id = nastepne_id("konkurs")
+
+    CONFIG["konkursy_dane"][konkurs_id] = {
+        "nagroda": nagroda,
+        "ilosc_zwyciezcow": zwyciezcy,
+        "koniec": koniec.timestamp(),
+        "wymagania": wymagania or "",
+        "wymagana_rola": wymagana_rola.id if wymagana_rola else 0,
+        "host_id": interaction.user.id,
+        "kanal_id": docelowy_kanal.id,
+        "message_id": 0,
+        "uczestnicy": [],
+        "zakonczony": False,
+        "zwyciezcy": [],
+    }
+    save_config()
+
+    wiadomosc = await docelowy_kanal.send(view=build_konkurs_panel(konkurs_id))
+    CONFIG["konkursy_dane"][konkurs_id]["message_id"] = wiadomosc.id
+    save_config()
+    bot.add_view(build_konkurs_panel(konkurs_id), message_id=wiadomosc.id)
+
+    await interaction.response.send_message(
+        f"✅ Utworzono konkurs **#{konkurs_id}** na {docelowy_kanal.mention}.", ephemeral=True)
+
+
+@konkurs_group.command(name="zakoncz", description="Kończy konkurs przed czasem i losuje zwycięzców")
+@app_commands.describe(id="ID konkursu (widoczne w /konkurs lista)")
+async def konkurs_zakoncz(interaction: discord.Interaction, id: str):
+    if not is_staff(interaction):
+        await interaction.response.send_message("⚠️ Brak uprawnień.", ephemeral=True)
+        return
+    wpis = konkurs_wpis(id)
+    if not wpis:
+        await interaction.response.send_message("⚠️ Nie znaleziono konkursu o takim ID.", ephemeral=True)
+        return
+    if wpis.get("zakonczony"):
+        await interaction.response.send_message("⚠️ Ten konkurs już się zakończył.", ephemeral=True)
+        return
+    await interaction.response.send_message(f"✅ Kończenie konkursu **#{id}**...", ephemeral=True)
+    await zakoncz_konkurs(bot, id)
+
+
+@konkurs_group.command(name="reroll", description="Losuje nowych zwycięzców zakończonego konkursu")
+@app_commands.describe(id="ID konkursu (widoczne w /konkurs lista)")
+async def konkurs_reroll(interaction: discord.Interaction, id: str):
+    if not is_staff(interaction):
+        await interaction.response.send_message("⚠️ Brak uprawnień.", ephemeral=True)
+        return
+    wpis = konkurs_wpis(id)
+    if not wpis:
+        await interaction.response.send_message("⚠️ Nie znaleziono konkursu o takim ID.", ephemeral=True)
+        return
+    if not wpis.get("zakonczony"):
+        await interaction.response.send_message("⚠️ Ten konkurs jeszcze się nie zakończył.", ephemeral=True)
+        return
+    await interaction.response.send_message(f"🔄 Losowanie ponowne konkursu **#{id}**...", ephemeral=True)
+    await zakoncz_konkurs(bot, id, reroll=True)
+
+
+@konkurs_group.command(name="usun", description="Usuwa konkurs bez losowania zwycięzców")
+@app_commands.describe(id="ID konkursu (widoczne w /konkurs lista)")
+async def konkurs_usun(interaction: discord.Interaction, id: str):
+    if not is_staff(interaction):
+        await interaction.response.send_message("⚠️ Brak uprawnień.", ephemeral=True)
+        return
+    wpis = CONFIG["konkursy_dane"].pop(id, None)
+    if not wpis:
+        await interaction.response.send_message("⚠️ Nie znaleziono konkursu o takim ID.", ephemeral=True)
+        return
+    save_config()
+    try:
+        kanal = interaction.guild.get_channel(wpis["kanal_id"])
+        wiadomosc = await kanal.fetch_message(wpis["message_id"])
+        await wiadomosc.delete()
+    except (discord.NotFound, discord.Forbidden, discord.HTTPException, AttributeError):
+        pass
+    await interaction.response.send_message(f"✅ Usunięto konkurs **#{id}**.", ephemeral=True)
+
+
+@konkurs_group.command(name="lista", description="Wyświetla listę aktywnych konkursów")
+async def konkurs_lista(interaction: discord.Interaction):
+    aktywne = {k: v for k, v in CONFIG["konkursy_dane"].items() if not v.get("zakonczony")}
+    if not aktywne:
+        await interaction.response.send_message("📋 Brak aktywnych konkursów.", ephemeral=True)
+        return
+    linie = []
+    for konkurs_id, wpis in aktywne.items():
+        linie.append(f"**#{konkurs_id}** — `{wpis['nagroda']}` — <t:{int(wpis['koniec'])}:R> — "
+                      f"{len(wpis.get('uczestnicy', []))} {forma_osob(len(wpis.get('uczestnicy', [])))}")
+    await interaction.response.send_message(view=PanelView("Aktywne Konkursy", "\n".join(linie)[:3900], "konkursy"), ephemeral=True)
+
+
+# ========================
+#   OGŁOSZENIA (styl changelogu - klasyczny embed, tak jak w bocie-wzorze)
+# ========================
+
+ogloszenie_group = app_commands.Group(name="ogloszenie", description="Wysyła / edytuje / usuwa ogłoszenie w stylu changelogu")
+
+
+def build_ogloszenie_embed(tytul: str, tresc: str) -> discord.Embed:
+    punkty = "\n".join(f"• {linia.strip()}" for linia in tresc.split("\\n") if linia.strip())
+    return karta(tytul, punkty, CONFIG["kolory"]["info"])
+
+
+@ogloszenie_group.command(name="wyslij", description="Wysyła ogłoszenie w stylu changelogu")
+@app_commands.describe(tytul="Tytuł, np. 'ChestPvP | Nowość'", tresc="Treść (użyj \\n dla nowej linijki / punktu)")
+async def ogloszenie_wyslij(interaction: discord.Interaction, tytul: str, tresc: str,
+                             kanal: Optional[discord.TextChannel] = None):
+    if not is_staff(interaction):
+        await interaction.response.send_message("⚠️ Brak uprawnień.", ephemeral=True)
+        return
+    docelowy = kanal
+    if docelowy is None:
+        kanal_id = CONFIG["kanaly"].get("ogloszenia")
+        docelowy = interaction.guild.get_channel(kanal_id) if kanal_id else interaction.channel
+
+    embed = build_ogloszenie_embed(tytul, tresc)
+    wiadomosc = await docelowy.send(embed=embed)
+
+    ogloszenie_id = nastepne_id("ogloszenie")
+    CONFIG["ogloszenia_dane"][ogloszenie_id] = {
+        "kanal_id": docelowy.id, "message_id": wiadomosc.id, "tytul": tytul, "tresc": tresc,
+    }
+    save_config()
+
+    await interaction.response.send_message(f"✅ Ogłoszenie **#{ogloszenie_id}** wysłane na {docelowy.mention}.", ephemeral=True)
+
+
+@ogloszenie_group.command(name="edytuj", description="Edytuje wcześniej wysłane ogłoszenie")
+@app_commands.describe(id="ID ogłoszenia (widoczne w /ogloszenie lista)")
+async def ogloszenie_edytuj(interaction: discord.Interaction, id: str, tytul: str, tresc: str):
+    if not is_staff(interaction):
+        await interaction.response.send_message("⚠️ Brak uprawnień.", ephemeral=True)
+        return
+    wpis = CONFIG["ogloszenia_dane"].get(id)
+    if not wpis:
+        await interaction.response.send_message("⚠️ Nie znaleziono ogłoszenia o takim ID.", ephemeral=True)
+        return
+    try:
+        kanal = interaction.guild.get_channel(wpis["kanal_id"])
+        wiadomosc = await kanal.fetch_message(wpis["message_id"])
+        await wiadomosc.edit(embed=build_ogloszenie_embed(tytul, tresc))
+    except (discord.NotFound, discord.Forbidden, discord.HTTPException, AttributeError):
+        await interaction.response.send_message("⚠️ Nie udało się znaleźć/edytować oryginalnej wiadomości.", ephemeral=True)
+        return
+    wpis["tytul"] = tytul
+    wpis["tresc"] = tresc
+    save_config()
+    await interaction.response.send_message(f"✅ Zaktualizowano ogłoszenie **#{id}**.", ephemeral=True)
+
+
+@ogloszenie_group.command(name="usun", description="Usuwa wysłane ogłoszenie")
+@app_commands.describe(id="ID ogłoszenia (widoczne w /ogloszenie lista)")
+async def ogloszenie_usun(interaction: discord.Interaction, id: str):
+    if not is_staff(interaction):
+        await interaction.response.send_message("⚠️ Brak uprawnień.", ephemeral=True)
+        return
+    wpis = CONFIG["ogloszenia_dane"].pop(id, None)
+    if not wpis:
+        await interaction.response.send_message("⚠️ Nie znaleziono ogłoszenia o takim ID.", ephemeral=True)
+        return
+    save_config()
+    try:
+        kanal = interaction.guild.get_channel(wpis["kanal_id"])
+        wiadomosc = await kanal.fetch_message(wpis["message_id"])
+        await wiadomosc.delete()
+    except (discord.NotFound, discord.Forbidden, discord.HTTPException, AttributeError):
+        pass
+    await interaction.response.send_message(f"✅ Usunięto ogłoszenie **#{id}**.", ephemeral=True)
+
+
+@ogloszenie_group.command(name="lista", description="Wyświetla listę wysłanych ogłoszeń")
+async def ogloszenie_lista(interaction: discord.Interaction):
+    if not CONFIG["ogloszenia_dane"]:
+        await interaction.response.send_message("📋 Brak wysłanych ogłoszeń.", ephemeral=True)
+        return
+    linie = [f"**#{oid}** — {w['tytul']}" for oid, w in CONFIG["ogloszenia_dane"].items()]
+    await interaction.response.send_message("\n".join(linie)[:1900], ephemeral=True)
 
 
 # ========================
@@ -838,7 +1315,7 @@ async def tickety_panel_cmd(interaction: discord.Interaction, kanal: discord.Tex
 konfiguracja_group = app_commands.Group(name="konfiguracja", description="Ustawienia bota")
 
 
-@konfiguracja_group.command(name="nazwa", description="Ustawia nazwę wyświetlaną w stopkach kart")
+@konfiguracja_group.command(name="nazwa", description="Ustawia nazwę wyświetlaną w nagłówkach i stopkach kart")
 async def konfig_nazwa(interaction: discord.Interaction, nazwa: str):
     if not is_admin(interaction):
         await interaction.response.send_message("⚠️ Brak uprawnień.", ephemeral=True)
@@ -853,10 +1330,12 @@ async def konfig_nazwa(interaction: discord.Interaction, nazwa: str):
     app_commands.Choice(name="Panel ticketów", value="tickety_panel"),
     app_commands.Choice(name="Log ticketów (transkrypty)", value="tickety_log"),
     app_commands.Choice(name="Centrum Pomocy", value="centrum_pomocy"),
-    app_commands.Choice(name="Propozycje", value="propozycje"),
-    app_commands.Choice(name="Ankiety", value="ankiety"),
+    app_commands.Choice(name="Propozycje (auto-zamiana wiadomości!)", value="propozycje"),
+    app_commands.Choice(name="Ankiety (auto-zamiana wiadomości!)", value="ankiety"),
     app_commands.Choice(name="Błędy", value="bledy"),
     app_commands.Choice(name="Ogłoszenia", value="ogloszenia"),
+    app_commands.Choice(name="Powitania", value="powitania"),
+    app_commands.Choice(name="Konkursy (domyślny kanał)", value="konkursy"),
 ])
 async def konfig_kanal(interaction: discord.Interaction, typ: app_commands.Choice[str], kanal: discord.TextChannel):
     if not is_admin(interaction):
@@ -882,11 +1361,6 @@ async def konfig_kategoria(interaction: discord.Interaction, kategoria: discord.
     app_commands.Choice(name="Staff", value="staff"),
     app_commands.Choice(name="Powiadomienia - Propozycje", value="powiadomienia_propozycje"),
     app_commands.Choice(name="Powiadomienia - Błędy", value="powiadomienia_bledy"),
-    app_commands.Choice(name="Tag - Propozycje", value="tag_propozycje"),
-    app_commands.Choice(name="Tag - Błędy", value="tag_bledy"),
-    app_commands.Choice(name="Tag - Centrum Pomocy", value="tag_centrum_pomocy"),
-    app_commands.Choice(name="Tag - Ankiety", value="tag_ankiety"),
-    app_commands.Choice(name="Tag - Ogłoszenia", value="tag_ogloszenia"),
 ])
 async def konfig_rola(interaction: discord.Interaction, typ: app_commands.Choice[str], rola: discord.Role):
     if not is_admin(interaction):
@@ -904,8 +1378,10 @@ async def konfig_rola(interaction: discord.Interaction, typ: app_commands.Choice
     app_commands.Choice(name="Błędy", value="bledy"),
     app_commands.Choice(name="Info / Ogłoszenia", value="info"),
     app_commands.Choice(name="Ankiety", value="ankiety"),
-    app_commands.Choice(name="Pomoc", value="pomoc"),
+    app_commands.Choice(name="Pomoc / Centrum Pomocy", value="pomoc"),
     app_commands.Choice(name="Tickety", value="tickety"),
+    app_commands.Choice(name="Powitania", value="powitanie"),
+    app_commands.Choice(name="Konkursy", value="konkursy"),
 ])
 async def konfig_kolor(interaction: discord.Interaction, sekcja: app_commands.Choice[str], hex: str):
     if not is_admin(interaction):
@@ -921,35 +1397,30 @@ async def konfig_kolor(interaction: discord.Interaction, sekcja: app_commands.Ch
     await interaction.response.send_message(f"✅ Kolor sekcji **{sekcja.name}** zmieniony.", ephemeral=True)
 
 
-# ========================
-#   OGŁOSZENIA (bonus - styl changelogu jak na screenie)
-# ========================
-
-ogloszenie_group = app_commands.Group(name="ogloszenie", description="Wysyła ogłoszenie / changelog")
-
-
-@ogloszenie_group.command(name="wyslij", description="Wysyła ogłoszenie w stylu changelogu")
-@app_commands.describe(tytul="Tytuł, np. 'ChestPvP | Nowość'", tresc="Treść (użyj \\n dla nowej linijki / punktu)")
-async def ogloszenie_wyslij(interaction: discord.Interaction, tytul: str, tresc: str,
-                             kanal: Optional[discord.TextChannel] = None):
-    if not is_staff(interaction):
+@konfiguracja_group.command(name="obrazek", description="Ustawia obrazek (link URL) dołączany do panelu")
+@app_commands.choices(typ=[
+    app_commands.Choice(name="Powitania", value="powitanie"),
+    app_commands.Choice(name="Konkursy", value="konkursy"),
+])
+@app_commands.describe(url="Link do zdjęcia (zostaw puste / wpisz 'brak', aby usunąć)")
+async def konfig_obrazek(interaction: discord.Interaction, typ: app_commands.Choice[str], url: str):
+    if not is_admin(interaction):
         await interaction.response.send_message("⚠️ Brak uprawnień.", ephemeral=True)
         return
-    docelowy = kanal
-    if docelowy is None:
-        kanal_id = CONFIG["kanaly"].get("ogloszenia")
-        docelowy = interaction.guild.get_channel(kanal_id) if kanal_id else interaction.channel
-
-    punkty = "\n".join(f"• {linia.strip()}" for linia in tresc.split("\\n") if linia.strip())
-    embed = karta(tytul, punkty, CONFIG["kolory"]["info"])
-    await wyslij_tag(docelowy, "Ogłoszenia", "tag_ogloszenia")
-    await docelowy.send(embed=embed)
-    await interaction.response.send_message(f"✅ Ogłoszenie wysłane na {docelowy.mention}.", ephemeral=True)
+    CONFIG["obrazki"][typ.value] = "" if url.lower() in ("brak", "-", "") else url
+    save_config()
+    await interaction.response.send_message(f"✅ Obrazek sekcji **{typ.name}** zaktualizowany.", ephemeral=True)
 
 
-# ========================
-#   START BOTA
-# ========================
+@konfiguracja_group.command(name="powitanie", description="Ustawia treść wiadomości powitalnej (możesz użyć {mention} i {ilosc})")
+async def konfig_powitanie(interaction: discord.Interaction, tresc: str):
+    if not is_admin(interaction):
+        await interaction.response.send_message("⚠️ Brak uprawnień.", ephemeral=True)
+        return
+    CONFIG["powitanie_tresc"] = tresc
+    save_config()
+    await interaction.response.send_message("✅ Treść powitania zaktualizowana.", ephemeral=True)
+
 
 # ========================
 #   /pomoc  — panel ze wszystkimi komendami bota
@@ -959,73 +1430,101 @@ POMOC_KATEGORIE = {
     "ogolne": {
         "etykieta": "🧭 Ogólne",
         "tresc": (
-            "> Witaj w panelu pomocy bota **IgrzyskaMC.PL**! Wybierz kategorię z listy niżej, "
-            "żeby zobaczyć dostępne komendy.\n\n"
-            "> `/pomoc` — Pokazuje ten panel.\n\n"
-            "> Zacznij od zakładki **⚙️ Konfiguracja**, jeśli dopiero ustawiasz bota od zera."
+            "Witaj w panelu pomocy bota **{nazwa}**! Wybierz kategorię z listy niżej, żeby "
+            "zobaczyć dostępne komendy.\n\n"
+            "`/pomoc` — Pokazuje ten panel.\n\n"
+            "Zacznij od zakładki **⚙️ Konfiguracja**, jeśli dopiero ustawiasz bota od zera."
         ),
     },
     "tickety": {
         "etykieta": "🎫 Tickety",
         "tresc": (
-            "> `/tickety panel <kanal>` — Wysyła panel z wyborem kategorii ticketu. *(Admin)*\n\n"
-            "> Ticket tworzy się automatycznie po wybraniu kategorii przez gracza — prywatny kanał "
-            "widoczny tylko dla autora i roli Staff.\n\n"
-            "> Przycisk **🔒 Zamknij ticket** w kanale zapisuje transkrypt (jeśli ustawiono kanał logów) "
-            "i usuwa kanał po 5 sekundach."
+            "`/tickety panel [kanal]` — Wysyła panel z wyborem kategorii ticketu. *(Admin)*\n\n"
+            "Ticket tworzy się automatycznie po wybraniu kategorii przez gracza — prywatny kanał "
+            "widoczny tylko dla autora i roli Staff. Można w nim swobodnie wysyłać zdjęcia.\n\n"
+            "Przycisk **🔒 Zamknij ticket** zapisuje transkrypt (jeśli ustawiono kanał logów) i "
+            "usuwa kanał po 5 sekundach."
         ),
     },
     "centrum_pomocy": {
         "etykieta": "❓ Centrum Pomocy",
         "tresc": (
-            "> `/centrumpomocy dodaj <pytanie> <odpowiedz>` — Dodaje wpis FAQ. *(Admin)*\n"
-            "> `/centrumpomocy edytuj <id> <pytanie> <odpowiedz>` — Edytuje wpis. *(Admin)*\n"
-            "> `/centrumpomocy usun <id>` — Usuwa wpis. *(Admin)*\n"
-            "> `/centrumpomocy lista` — Pokazuje wszystkie wpisy z ID.\n"
-            "> `/centrumpomocy panel <kanal>` — Wysyła panel z listą wyboru tematu. *(Admin)*\n"
-            "> `/centrumpomocy zasady` — Wysyła informacje/regulamin Centrum Pomocy (godziny, zasady, dozwolone programy). *(Admin)*"
+            "`/centrumpomocy dodaj <pytanie> <odpowiedz> [obrazek]` — Dodaje wpis FAQ, opcjonalnie ze zdjęciem. *(Admin)*\n"
+            "`/centrumpomocy edytuj <id> <pytanie> <odpowiedz> [obrazek]` — Edytuje wpis. *(Admin)*\n"
+            "`/centrumpomocy usun <id>` — Usuwa wpis. *(Admin)*\n"
+            "`/centrumpomocy lista` — Pokazuje wszystkie wpisy z ID.\n"
+            "`/centrumpomocy panel [kanal]` — Wysyła panel z listą wyboru tematu. *(Admin)*\n"
+            "`/centrumpomocy zasady` — Wysyła zasady Centrum Pomocy (godziny, regulamin, programy). *(Admin)*"
         ),
     },
     "propozycje": {
         "etykieta": "💡 Propozycje",
         "tresc": (
-            "> `/propozycje panel <kanal>` — Wysyła panel z przyciskiem 'Napisz swoją propozycję'. *(Admin)*\n"
-            "> `/propozycje status <id> <status>` — Zmienia status propozycji. *(Staff)*\n"
-            "> `/propozycje usun <id>` — Usuwa propozycję. *(Staff)*\n\n"
-            "> Gracze głosują reakcjami 👍/👎 pod każdą propozycją."
+            "`/propozycje panel [kanal]` — Wysyła panel z przyciskiem 'Napisz swoją propozycję'. *(Admin)*\n"
+            "`/propozycje status <id> <status>` — Zmienia status propozycji. *(Staff)*\n"
+            "`/propozycje usun <id>` — Usuwa propozycję. *(Staff)*\n\n"
+            "**Najprościej:** ustaw kanał propozycji w `/konfiguracja kanal` — każda wiadomość "
+            "napisana tam (tekst i/lub zdjęcie) sama zamieni się w kartę propozycji z reakcjami 👍/👎. "
+            "Przycisk z panelu robi to samo przez okienko (bez zdjęcia)."
         ),
     },
     "bledy": {
         "etykieta": "🐞 Błędy",
         "tresc": (
-            "> `/bledy panel <kanal>` — Wysyła panel z przyciskiem 'Zgłoś błąd'. *(Admin)*\n"
-            "> `/bledy status <id> <status>` — Zmienia status zgłoszenia. *(Staff)*\n"
-            "> `/bledy usun <id>` — Usuwa zgłoszenie. *(Staff)*"
+            "`/bledy panel [kanal]` — Wysyła panel z przyciskiem 'Zgłoś błąd'. *(Admin)*\n"
+            "`/bledy status <id> <status>` — Zmienia status zgłoszenia. *(Staff)*\n"
+            "`/bledy usun <id>` — Usuwa zgłoszenie. *(Staff)*"
         ),
     },
     "ankiety": {
         "etykieta": "📊 Ankiety",
         "tresc": (
-            "> `/ankieta stworz <pytanie> <opcja1> <opcja2> [...] [czas] [kanal]` — Tworzy ankietę (2-5 opcji). *(Staff)*\n"
-            "> `/ankieta zakoncz <id>` — Kończy ankietę przed czasem. *(Staff)*\n\n"
-            "> Wyniki (paski % i liczba głosów) aktualizują się na żywo po każdym głosie."
+            "`/ankieta usun <id>` — Usuwa ankietę. *(Staff)*\n\n"
+            "**Najprościej:** ustaw kanał ankiet w `/konfiguracja kanal` — każda wiadomość napisana "
+            "tam zamienia się w ankietę tak/nie. Liczbę głosów pokazują natywne reakcje ✅/❌ Discorda."
         ),
     },
     "ogloszenia": {
         "etykieta": "📢 Ogłoszenia",
         "tresc": (
-            "> `/ogloszenie wyslij <tytul> <tresc> [kanal]` — Wysyła ogłoszenie w stylu changelogu.\n"
-            "> W treści użyj `\\n`, żeby rozbić tekst na osobne punkty (każda linijka = jeden punkt). *(Staff)*"
+            "`/ogloszenie wyslij <tytul> <tresc> [kanal]` — Wysyła ogłoszenie w stylu changelogu. "
+            "W treści użyj `\\n`, żeby rozbić tekst na osobne punkty. *(Staff)*\n"
+            "`/ogloszenie edytuj <id> <tytul> <tresc>` — Edytuje wysłane ogłoszenie. *(Staff)*\n"
+            "`/ogloszenie usun <id>` — Usuwa wysłane ogłoszenie. *(Staff)*\n"
+            "`/ogloszenie lista` — Pokazuje listę wysłanych ogłoszeń z ID."
+        ),
+    },
+    "konkursy": {
+        "etykieta": "🎉 Konkursy",
+        "tresc": (
+            "`/konkurs stworz <nagroda> <zwyciezcy> <czas> [kanal] [wymagania] [wymagana_rola]` — "
+            "Tworzy nowy konkurs. *(Staff)*\n"
+            "`/konkurs zakoncz <id>` — Kończy konkurs przed czasem i losuje zwycięzców. *(Staff)*\n"
+            "`/konkurs reroll <id>` — Losuje nowych zwycięzców ponownie. *(Staff)*\n"
+            "`/konkurs usun <id>` — Usuwa konkurs bez losowania. *(Staff)*\n"
+            "`/konkurs lista` — Wyświetla listę aktywnych konkursów."
+        ),
+    },
+    "powitania": {
+        "etykieta": "👋 Powitania",
+        "tresc": (
+            "`/konfiguracja kanal Powitania <kanal>` — Ustawia kanał powitań. *(Admin)*\n"
+            "`/konfiguracja powitanie <tresc>` — Ustawia treść (możesz użyć `{mention}` i `{ilosc}`). *(Admin)*\n"
+            "`/konfiguracja obrazek Powitania <url>` — Ustawia obrazek dołączony do powitania. *(Admin)*\n\n"
+            "Wiadomość wysyła się automatycznie, gdy ktoś dołączy do serwera."
         ),
     },
     "konfiguracja": {
         "etykieta": "⚙️ Konfiguracja",
         "tresc": (
-            "> `/konfiguracja nazwa <nazwa>` — Nazwa wyświetlana w stopkach kart. *(Admin)*\n"
-            "> `/konfiguracja kanal <typ> <kanal>` — Ustawia kanał modułu (tickety, propozycje, błędy, ankiety, centrum pomocy, log ticketów, ogłoszenia). *(Admin)*\n"
-            "> `/konfiguracja kategoria-ticketow <kategoria>` — Kategoria, w której tworzą się kanały ticketów. *(Admin)*\n"
-            "> `/konfiguracja rola <typ> <rola>` — Rola Staff / powiadomień / tagów sekcji. *(Admin)*\n"
-            "> `/konfiguracja kolor <sekcja> <hex>` — Kolor karty danej sekcji, np. `#5865F2`. *(Admin)*"
+            "`/konfiguracja nazwa <nazwa>` — Nazwa w nagłówkach i stopkach kart. *(Admin)*\n"
+            "`/konfiguracja kanal <typ> <kanal>` — Kanał modułu (tickety, propozycje, ankiety, "
+            "błędy, centrum pomocy, log ticketów, ogłoszenia, powitania, konkursy). *(Admin)*\n"
+            "`/konfiguracja kategoria-ticketow <kategoria>` — Kategoria, w której tworzą się tickety. *(Admin)*\n"
+            "`/konfiguracja rola <typ> <rola>` — Rola Staff / powiadomień. *(Admin)*\n"
+            "`/konfiguracja kolor <sekcja> <hex>` — Kolor karty danej sekcji, np. `#5865F2`. *(Admin)*\n"
+            "`/konfiguracja obrazek <typ> <url>` — Obrazek dla powitań/konkursów. *(Admin)*\n"
+            "`/konfiguracja powitanie <tresc>` — Treść powitania. *(Admin)*"
         ),
     },
 }
@@ -1041,24 +1540,28 @@ class PomocSelect(discord.ui.Select):
                           custom_id="igrzyskamc:pomoc:kategoria", min_values=1, max_values=1)
 
     async def callback(self, interaction: discord.Interaction):
-        await interaction.response.edit_message(embed=build_pomoc_embed(self.values[0]),
-                                                  view=PomocPanel(self.values[0]))
+        await interaction.response.edit_message(view=PomocPanel(self.values[0]))
 
 
-def build_pomoc_embed(kategoria: str) -> discord.Embed:
-    dane = POMOC_KATEGORIE.get(kategoria, POMOC_KATEGORIE["ogolne"])
-    return karta(f"📖 Pomoc — {dane['etykieta']}", dane["tresc"], CONFIG["kolory"]["info"])
-
-
-class PomocPanel(discord.ui.View):
+class PomocPanel(discord.ui.LayoutView):
     def __init__(self, kategoria: str = "ogolne"):
         super().__init__(timeout=300)
-        self.add_item(PomocSelect(kategoria))
+        dane = POMOC_KATEGORIE.get(kategoria, POMOC_KATEGORIE["ogolne"])
+        nazwa = CONFIG.get("nazwa_serwera", "Bot")
+        tresc = dane["tresc"].format_map(SafeDict(nazwa=nazwa))
+
+        dzieci = [header_text(f"Pomoc — {dane['etykieta']}"), discord.ui.Separator(),
+                  discord.ui.TextDisplay(cytuj(tresc)), discord.ui.Separator(),
+                  discord.ui.ActionRow(PomocSelect(kategoria)),
+                  discord.ui.Separator(spacing=discord.SeparatorSpacing.small),
+                  discord.ui.TextDisplay(footer_line("Pomoc"))]
+        self.container = discord.ui.Container(*dzieci, accent_color=get_kolor("pomoc"))
+        self.add_item(self.container)
 
 
 @bot.tree.command(name="pomoc", description="Pokazuje wszystkie dostępne komendy bota")
 async def pomoc_cmd(interaction: discord.Interaction):
-    await interaction.response.send_message(embed=build_pomoc_embed("ogolne"), view=PomocPanel(), ephemeral=True)
+    await interaction.response.send_message(view=PomocPanel(), ephemeral=True)
 
 
 # ========================
@@ -1072,6 +1575,7 @@ bot.tree.add_command(ankieta_group)
 bot.tree.add_command(tickety_group)
 bot.tree.add_command(konfiguracja_group)
 bot.tree.add_command(ogloszenie_group)
+bot.tree.add_command(konkurs_group)
 
 
 @bot.event
@@ -1083,18 +1587,18 @@ async def on_ready():
 
     for numer, wpis in list(CONFIG["tickety_dane"].items()):
         if not wpis.get("zamkniety"):
-            bot.add_view(TicketZamknijView(numer))
+            bot.add_view(build_ticket_panel(numer, wpis.get("kategoria", "Inne"), wpis.get("autor_id", 0)))
 
     teraz = datetime.datetime.now(datetime.timezone.utc).timestamp()
-    for ankieta_id, wpis in list(CONFIG["ankiety_dane"].items()):
-        if not wpis.get("zakonczona"):
-            if wpis.get("koniec") and wpis["koniec"] <= teraz:
-                await zakoncz_ankiete(bot, ankieta_id)
+    for konkurs_id, wpis in list(CONFIG["konkursy_dane"].items()):
+        if not wpis.get("zakonczony"):
+            if wpis.get("koniec", 0) <= teraz:
+                await zakoncz_konkurs(bot, konkurs_id)
             elif wpis.get("message_id"):
-                bot.add_view(build_ankieta_view(ankieta_id), message_id=wpis["message_id"])
+                bot.add_view(build_konkurs_panel(konkurs_id), message_id=wpis["message_id"])
 
-    if not sprawdzaj_ankiety.is_running():
-        sprawdzaj_ankiety.start()
+    if not sprawdzaj_konkursy.is_running():
+        sprawdzaj_konkursy.start()
 
     if TEST_GUILD_ID:
         guild_obj = discord.Object(id=TEST_GUILD_ID)
