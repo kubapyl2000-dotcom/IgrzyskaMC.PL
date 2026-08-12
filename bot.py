@@ -1,7 +1,7 @@
 """
 IgrzyskaMC.PL - Discord Bot
 Moduły: Tickety (ze zdjęciami), Centrum Pomocy (ze zdjęciami), Ankiety, Propozycje,
-        Błędy, Powitania, Konkursy/Giveaway'e, Ogłoszenia
+        Błędy, Powitania, Konkursy/Giveaway'e
 
 Wymagane zmienne środowiskowe:
   DISCORD_TOKEN   - token bota
@@ -12,10 +12,15 @@ Wymagane zmienne środowiskowe:
   kanale (tekst i/lub zdjęcie) zamienia się automatycznie w kartę propozycji z reakcjami 👍/👎.
   Można też skorzystać z przycisku "Napisz swoją propozycję" (/propozycje panel) - to samo,
   tylko przez okienko (bez zdjęcia, bo Discord nie pozwala dodawać zdjęć w oknach/modalach).
+- Błędy: ustaw kanał (/konfiguracja kanal Błędy). Każda wiadomość napisana tam zamienia się
+  automatycznie w kartę zgłoszenia błędu - bez przycisków głosowania (tak/nie).
 - Ankiety: ustaw kanał (/konfiguracja kanal Ankiety). Każda wiadomość na tym kanale zamienia
   się w ankietę tak/nie - liczbę głosów pokazują natywne reakcje ✅ / ❌ Discorda.
-- Wszystko (propozycje, błędy, ankiety, ogłoszenia, konkursy) da się edytować i usuwać
-  komendami staffu/adminów - patrz /pomoc.
+- Tickety: kategorie (nazwa + opcjonalny formularz pytań) w pełni edytowalne komendą
+  /tickety kategorie - interaktywny panel z przyciskami (dodaj/edytuj/usuń).
+- Kolory bocznego paska każdej sekcji (w tym ticketów) zmienisz komendą /konfiguracja kolor.
+- Wszystko (propozycje, błędy, ankiety, konkursy) da się edytować i usuwać komendami
+  staffu/adminów - patrz /pomoc.
 """
 
 import os
@@ -43,7 +48,6 @@ DEFAULT_CONFIG = {
     "kolory": {
         "propozycje": 0x5865F2,
         "bledy": 0xED4245,
-        "info": 0x57F287,
         "ankiety": 0xFEE75C,
         "pomoc": 0x5865F2,
         "tickety": 0x5865F2,
@@ -64,7 +68,6 @@ DEFAULT_CONFIG = {
         "propozycje": 0,
         "ankiety": 0,
         "bledy": 0,
-        "ogloszenia": 0,
         "powitania": 0,
         "konkursy": 0,
     },
@@ -76,8 +79,7 @@ DEFAULT_CONFIG = {
     },
 
     "liczniki": {
-        "propozycja": 0, "blad": 0, "ankieta": 0, "ticket": 0,
-        "faq": 0, "ogloszenie": 0, "konkurs": 0,
+        "propozycja": 0, "blad": 0, "ankieta": 0, "ticket": 0, "faq": 0, "konkurs": 0,
     },
 
     "powitanie_tresc": (
@@ -85,11 +87,27 @@ DEFAULT_CONFIG = {
         "» Jesteś naszym **{ilosc}** członkiem na serwerze."
     ),
 
+    # Kategorie ticketów - każda ma etykietę (widoczną w menu) i opcjonalną listę pytań
+    # formularza (max 5, limit Discorda). Jeśli "pytania" jest puste, ticket tworzy się
+    # od razu po wybraniu kategorii (bez okienka).
+    "ticket_kategorie": {
+        "pomoc": {"etykieta": "🛠️ Pomoc techniczna", "pytania": []},
+        "zgloszenie_gracza": {
+            "etykieta": "🚨 Zgłoszenie gracza",
+            "pytania": [
+                {"tresc": "Nick zgłaszanego gracza", "styl": "short", "wymagane": True, "placeholder": "np. NickGracza", "max_length": 50},
+                {"tresc": "Opisz sytuację", "styl": "paragraph", "wymagane": True, "placeholder": "Co dokładnie się wydarzyło?", "max_length": 1000},
+                {"tresc": "Dowody (screeny/klipy)", "styl": "paragraph", "wymagane": False, "placeholder": "Wklej link lub napisz, że wyślesz w tickecie", "max_length": 500},
+            ],
+        },
+        "wspolpraca": {"etykieta": "🤝 Współpraca / Biznes", "pytania": []},
+        "inne": {"etykieta": "❓ Inne", "pytania": []},
+    },
+
     "propozycje_dane": {},
     "bledy_dane": {},
     "ankiety_dane": {},
     "tickety_dane": {},
-    "ogloszenia_dane": {},
     "konkursy_dane": {},
     "faq": [],
 }
@@ -341,6 +359,53 @@ class ZgloszenieModal(discord.ui.Modal):
         await interaction.response.send_message(f"✅ {dane['nazwa']} **#{wpis_id}** została wysłana na {kanal.mention}!", ephemeral=True)
 
 
+class NapiszPropozycjeKartaButton(discord.ui.Button):
+    """Przycisk 'Napisz swoją propozycję' dołączony pod KAŻDĄ kartą propozycji (nie tylko
+    głównym panelem) - dokładnie jak na wzorze."""
+
+    def __init__(self):
+        super().__init__(label="Napisz swoją propozycję", emoji="📝", style=discord.ButtonStyle.primary,
+                          custom_id="igrzyskamc:propozycja:napisz_karta")
+
+    async def callback(self, interaction: discord.Interaction):
+        await interaction.response.send_modal(ZgloszenieModal("propozycja"))
+
+
+class PowiadamiajPropozycjeButton(discord.ui.Button):
+    """Przycisk 'Powiadamiaj o nowych propozycjach' - włącza/wyłącza rolę powiadomień
+    (samodzielny zapis, bez udziału administracji)."""
+
+    def __init__(self):
+        super().__init__(label="Powiadamiaj o nowych propozycjach", emoji="🔔",
+                          style=discord.ButtonStyle.secondary,
+                          custom_id="igrzyskamc:propozycja:powiadamiaj")
+
+    async def callback(self, interaction: discord.Interaction):
+        rola_id = CONFIG["role"].get("powiadomienia_propozycje")
+        rola = interaction.guild.get_role(rola_id) if rola_id else None
+        if not rola:
+            await interaction.response.send_message(
+                "⚠️ Administracja nie skonfigurowała jeszcze roli powiadomień (`/konfiguracja rola`).", ephemeral=True)
+            return
+        if rola in interaction.user.roles:
+            await interaction.user.remove_roles(rola)
+            await interaction.response.send_message("🔕 Wyłączono powiadomienia o nowych propozycjach.", ephemeral=True)
+        else:
+            await interaction.user.add_roles(rola)
+            await interaction.response.send_message("🔔 Będziesz teraz otrzymywać powiadomienia o nowych propozycjach!", ephemeral=True)
+
+
+class PropozycjaKartaGlobalView(discord.ui.View):
+    """Rejestrowany raz globalnie (bez message_id) - obsługuje przyciski 'Napisz swoją
+    propozycję' i 'Powiadamiaj o nowych propozycjach' na KAŻDEJ karcie propozycji naraz,
+    bo ich zachowanie nie zależy od konkretnej wiadomości/ID."""
+
+    def __init__(self):
+        super().__init__(timeout=None)
+        self.add_item(NapiszPropozycjeKartaButton())
+        self.add_item(PowiadamiajPropozycjeButton())
+
+
 def build_zgloszenie_panelview(typ: str, wpis_id: str) -> PanelView:
     dane = ZGLOSZENIA_TYPY[typ]
     wpis = CONFIG[dane["magazyn"]][wpis_id]
@@ -355,7 +420,11 @@ def build_zgloszenie_panelview(typ: str, wpis_id: str) -> PanelView:
     linie.append(f"*Status: {wpis['status']} • #{wpis_id}*")
     opis = "\n".join(linie)
 
-    return PanelView(dane["sekcja"], opis, dane["kolor"], obrazek_url=wpis.get("obrazek"))
+    # Karty propozycji mają pod spodem te same dwa przyciski co panel ("Napisz swoją
+    # propozycję" i "Powiadamiaj o nowych propozycjach") - dokładnie jak na wzorze.
+    items = [NapiszPropozycjeKartaButton(), PowiadamiajPropozycjeButton()] if typ == "propozycja" else None
+
+    return PanelView(dane["sekcja"], opis, dane["kolor"], items=items, obrazek_url=wpis.get("obrazek"))
 
 
 async def zmien_status_zgloszenia(bot_instance: commands.Bot, typ: str, wpis_id: str, nowy_status: str) -> bool:
@@ -562,6 +631,49 @@ async def obsluz_wiadomosc_propozycji(message: discord.Message):
                                         allowed_mentions=discord.AllowedMentions(roles=True))
 
 
+async def obsluz_wiadomosc_bledu(message: discord.Message):
+    """Dokładnie jak z propozycjami: napisz na wyznaczonym kanale (tekst i/lub zdjęcie), a bot
+    sam zamieni to w kartę zgłoszenia błędu - bez przycisków głosowania (tak/nie)."""
+    tresc = message.content.strip()
+    obrazek = znajdz_obrazek(message)
+    if not tresc and not obrazek:
+        try:
+            await message.delete()
+        except (discord.Forbidden, discord.NotFound):
+            pass
+        return
+
+    wpis_id = nastepne_id("blad")
+    CONFIG["bledy_dane"][wpis_id] = {
+        "autor_id": message.author.id,
+        "autor_nazwa": message.author.display_name,
+        "tryb": "",
+        "tresc": tresc,
+        "obrazek": obrazek,
+        "kanal_id": message.channel.id,
+        "message_id": 0,
+        "status": ZGLOSZENIA_TYPY["blad"]["status_startowy"],
+    }
+    save_config()
+
+    try:
+        await message.delete()
+    except (discord.Forbidden, discord.NotFound):
+        pass
+
+    wiadomosc = await message.channel.send(view=build_zgloszenie_panelview("blad", wpis_id))
+
+    CONFIG["bledy_dane"][wpis_id]["message_id"] = wiadomosc.id
+    save_config()
+
+    rola_id = CONFIG["role"].get("powiadomienia_bledy")
+    if rola_id:
+        rola = message.guild.get_role(rola_id)
+        if rola:
+            await message.channel.send(f"🔔 {rola.mention} — nowe zgłoszenie błędu czeka!",
+                                        allowed_mentions=discord.AllowedMentions(roles=True))
+
+
 async def obsluz_wiadomosc_ankiety(message: discord.Message):
     tresc = message.content.strip()
     obrazek = znajdz_obrazek(message)
@@ -611,6 +723,11 @@ async def on_message(message: discord.Message):
     kanal_propozycje = CONFIG["kanaly"].get("propozycje")
     if kanal_propozycje and message.channel.id == kanal_propozycje:
         await obsluz_wiadomosc_propozycji(message)
+        return
+
+    kanal_bledy = CONFIG["kanaly"].get("bledy")
+    if kanal_bledy and message.channel.id == kanal_bledy:
+        await obsluz_wiadomosc_bledu(message)
         return
 
     kanal_ankiety = CONFIG["kanaly"].get("ankiety")
@@ -797,9 +914,20 @@ async def cp_zasady(interaction: discord.Interaction, godziny: str = "14.00-23.0
 # ========================
 #   TICKETY (ze zdjęciami - załączniki działają w kanale ticketu jak w każdej
 #   zwykłej rozmowie na Discordzie, nie trzeba nic dodatkowo klikać)
+#
+#   Kategorie ticketów są w pełni edytowalne z Discorda (CONFIG["ticket_kategorie"]):
+#   każda ma nazwę widoczną w menu i opcjonalną listę pytań formularza (max 5 - limit
+#   Discorda). Zarządza się nimi przez /tickety kategorie (panel z przyciskami).
 # ========================
 
-TICKET_KATEGORIE = ["Pomoc techniczna", "Zgłoszenie gracza", "Współpraca / Biznes", "Inne"]
+def _limit_kategorii(gildia: discord.Guild, autor_id: int) -> Optional[discord.TextChannel]:
+    """Sprawdza, czy dany użytkownik ma już otwarty (niezamknięty) ticket."""
+    for numer, wpis in CONFIG["tickety_dane"].items():
+        if wpis.get("autor_id") == autor_id and not wpis.get("zamkniety"):
+            kanal = gildia.get_channel(wpis.get("kanal_id"))
+            if kanal:
+                return kanal
+    return None
 
 
 class ZamknijTicketButton(discord.ui.Button):
@@ -842,59 +970,132 @@ class ZamknijTicketButton(discord.ui.Button):
             pass
 
 
-def build_ticket_panel(numer: str, kategoria: str, autor_id: int, zamkniety: bool = False) -> PanelView:
-    opis = (f"Witaj <@{autor_id}>! Opisz swój problem, a nasz zespół odezwie się najszybciej jak to możliwe.\n\n"
-            f"» Zanim napiszesz, sprawdź może odpowiedź jest już w Centrum Pomocy!\n"
-            f"» Możesz tu spokojnie wysyłać zdjęcia - po prostu dodaj załącznik do wiadomości.")
+def build_ticket_panel(numer: str, kategoria: str, autor_id: int, zamkniety: bool = False,
+                        odpowiedzi: Optional[dict] = None) -> PanelView:
+    linie = [f"Witaj <@{autor_id}>! Opisz swój problem, a nasz zespół odezwie się najszybciej jak to możliwe.",
+             "", "» Zanim napiszesz, sprawdź może odpowiedź jest już w Centrum Pomocy!",
+             "» Możesz tu spokojnie wysyłać zdjęcia - po prostu dodaj załącznik do wiadomości."]
+    if odpowiedzi:
+        linie.append("")
+        linie.append("**Odpowiedzi z formularza:**")
+        for pytanie, odp in odpowiedzi.items():
+            linie.append(f"• **{pytanie}:** {odp or '*brak odpowiedzi*'}")
+    opis = "\n".join(linie)
     return PanelView(f"Ticket #{numer} — {kategoria}", opis, "tickety",
                       items=[ZamknijTicketButton(numer, disabled=zamkniety)])
 
 
+async def utworz_ticket(interaction: discord.Interaction, klucz: str, etykieta: str,
+                         odpowiedzi: Optional[dict] = None):
+    gildia = interaction.guild
+
+    istniejacy = _limit_kategorii(gildia, interaction.user.id)
+    if istniejacy:
+        await interaction.response.send_message(f"⚠️ Masz już otwarty ticket: {istniejacy.mention}", ephemeral=True)
+        return
+
+    numer = nastepne_id("ticket")
+
+    kategoria_id = CONFIG["kanaly"].get("tickety_kategoria")
+    kategoria_obiekt = gildia.get_channel(kategoria_id) if kategoria_id else None
+
+    przeciazenia = {
+        gildia.default_role: discord.PermissionOverwrite(view_channel=False),
+        interaction.user: discord.PermissionOverwrite(view_channel=True, send_messages=True,
+                                                        attach_files=True, read_message_history=True),
+        gildia.me: discord.PermissionOverwrite(view_channel=True, send_messages=True),
+    }
+    staff_id = CONFIG["role"].get("staff")
+    if staff_id:
+        staff_rola = gildia.get_role(staff_id)
+        if staff_rola:
+            przeciazenia[staff_rola] = discord.PermissionOverwrite(view_channel=True, send_messages=True,
+                                                                    attach_files=True, read_message_history=True)
+
+    try:
+        kanal = await gildia.create_text_channel(
+            name=f"ticket-{numer}", category=kategoria_obiekt, overwrites=przeciazenia,
+            topic=f"Ticket #{numer} • {etykieta} • Właściciel: {interaction.user.id}",
+        )
+    except discord.Forbidden:
+        await interaction.response.send_message("⚠️ Bot nie ma uprawnień do tworzenia kanałów.", ephemeral=True)
+        return
+
+    CONFIG["tickety_dane"][numer] = {
+        "autor_id": interaction.user.id, "kategoria": etykieta, "kategoria_klucz": klucz,
+        "kanal_id": kanal.id, "zamkniety": False, "odpowiedzi": odpowiedzi or {},
+    }
+    save_config()
+
+    widok = build_ticket_panel(numer, etykieta, interaction.user.id, odpowiedzi=odpowiedzi)
+    tresc_pingow = interaction.user.mention
+    staff_id = CONFIG["role"].get("staff")
+    if staff_id:
+        staff_rola = gildia.get_role(staff_id)
+        if staff_rola:
+            tresc_pingow += f" {staff_rola.mention}"
+    await kanal.send(content=tresc_pingow, view=widok,
+                      allowed_mentions=discord.AllowedMentions(everyone=False, roles=True, users=True))
+    bot.add_view(widok)
+
+    if interaction.response.is_done():
+        await interaction.followup.send(f"✅ Utworzono ticket: {kanal.mention}", ephemeral=True)
+    else:
+        await interaction.response.send_message(f"✅ Utworzono ticket: {kanal.mention}", ephemeral=True)
+
+
+class DynamicTicketModal(discord.ui.Modal):
+    """Modal budowany dynamicznie na podstawie pytań skonfigurowanych dla danej kategorii."""
+
+    def __init__(self, klucz: str, etykieta: str, pytania: List[dict]):
+        super().__init__(title=f"Ticket - {etykieta}"[:45])
+        self.klucz = klucz
+        self.etykieta = etykieta
+        self.pola = []
+        for pytanie in pytania[:5]:
+            pole = discord.ui.TextInput(
+                label=pytanie["tresc"][:45],
+                style=discord.TextStyle.paragraph if pytanie.get("styl") == "paragraph" else discord.TextStyle.short,
+                placeholder=(pytanie.get("placeholder") or None),
+                required=pytanie.get("wymagane", True),
+                max_length=pytanie.get("max_length", 1000 if pytanie.get("styl") == "paragraph" else 100),
+            )
+            self.add_item(pole)
+            self.pola.append((pytanie["tresc"], pole))
+
+    async def on_submit(self, interaction: discord.Interaction):
+        odpowiedzi = {tresc: str(pole.value) for tresc, pole in self.pola}
+        await utworz_ticket(interaction, self.klucz, self.etykieta, odpowiedzi)
+
+
 class TicketySelect(discord.ui.Select):
     def __init__(self):
-        opcje = [discord.SelectOption(label=k, emoji="🎫") for k in TICKET_KATEGORIE]
+        kategorie = CONFIG["ticket_kategorie"]
+        opcje = [discord.SelectOption(label=dane["etykieta"][:100], value=klucz, emoji="🎫")
+                 for klucz, dane in list(kategorie.items())[:25]]
+        if not opcje:
+            opcje = [discord.SelectOption(label="Brak kategorii - skonfiguruj /tickety kategorie", value="brak")]
         super().__init__(placeholder="Wybierz kategorię ticketu...", options=opcje,
                           custom_id="igrzyskamc:tickety:select")
 
     async def callback(self, interaction: discord.Interaction):
-        kategoria = self.values[0]
-        gildia = interaction.guild
-        numer = nastepne_id("ticket")
-
-        kategoria_id = CONFIG["kanaly"].get("tickety_kategoria")
-        kategoria_obiekt = gildia.get_channel(kategoria_id) if kategoria_id else None
-
-        przeciazenia = {
-            gildia.default_role: discord.PermissionOverwrite(view_channel=False),
-            interaction.user: discord.PermissionOverwrite(view_channel=True, send_messages=True,
-                                                            attach_files=True, read_message_history=True),
-            gildia.me: discord.PermissionOverwrite(view_channel=True, send_messages=True),
-        }
-        staff_id = CONFIG["role"].get("staff")
-        if staff_id:
-            staff_rola = gildia.get_role(staff_id)
-            if staff_rola:
-                przeciazenia[staff_rola] = discord.PermissionOverwrite(view_channel=True, send_messages=True,
-                                                                        attach_files=True, read_message_history=True)
-
-        try:
-            kanal = await gildia.create_text_channel(
-                name=f"ticket-{numer}", category=kategoria_obiekt, overwrites=przeciazenia,
-                topic=f"Ticket #{numer} • {kategoria} • Właściciel: {interaction.user.id}",
-            )
-        except discord.Forbidden:
-            await interaction.response.send_message("⚠️ Bot nie ma uprawnień do tworzenia kanałów.", ephemeral=True)
+        if self.values[0] == "brak":
+            await interaction.response.send_message("⚠️ Administracja jeszcze nie skonfigurowała kategorii.", ephemeral=True)
             return
 
-        CONFIG["tickety_dane"][numer] = {
-            "autor_id": interaction.user.id, "kategoria": kategoria, "kanal_id": kanal.id, "zamkniety": False,
-        }
-        save_config()
+        dane = CONFIG["ticket_kategorie"].get(self.values[0])
+        if dane is None:
+            await interaction.response.send_message(
+                "⚠️ Ta kategoria już nie istnieje. Odśwież panel komendą `/tickety panel`.", ephemeral=True)
+            return
 
-        widok = build_ticket_panel(numer, kategoria, interaction.user.id)
-        await kanal.send(content=interaction.user.mention, view=widok)
-        bot.add_view(widok)
-        await interaction.response.send_message(f"✅ Utworzono ticket: {kanal.mention}", ephemeral=True)
+        etykieta = dane["etykieta"]
+        pytania = dane.get("pytania", [])
+
+        if pytania:
+            await interaction.response.send_modal(DynamicTicketModal(self.values[0], etykieta, pytania))
+        else:
+            await utworz_ticket(interaction, self.values[0], etykieta)
 
 
 class TicketyPanel(discord.ui.LayoutView):
@@ -925,7 +1126,241 @@ async def tickety_panel_cmd(interaction: discord.Interaction, kanal: Optional[di
         kanal_id = CONFIG["kanaly"].get("tickety_panel")
         docelowy = interaction.guild.get_channel(kanal_id) if kanal_id else interaction.channel
     await docelowy.send(view=TicketyPanel())
+    CONFIG["kanaly"]["tickety_panel"] = docelowy.id
+    save_config()
     await interaction.response.send_message(f"✅ Panel ticketów wysłany na {docelowy.mention}.", ephemeral=True)
+
+
+# ------------------------
+#   Interaktywny panel zarządzania kategoriami ticketów (lista + przyciski),
+#   tak jak w bot1.py: dropdown do wyboru kategorii do edycji, dodawanie/usuwanie
+#   kategorii i pytań formularza (max 5 pytań na kategorię - limit Discorda).
+# ------------------------
+
+def _kategoria_opis_linia(klucz: str, dane: dict) -> str:
+    ile = len(dane.get("pytania", []))
+    info = f"{ile} pytań w formularzu" if ile else "bez formularza (ticket od razu)"
+    return f"**{dane['etykieta']}** `({klucz})` — {info}"
+
+
+def render_kategoria_glowny():
+    embed = discord.Embed(title="🗂️ Zarządzanie kategoriami ticketów", color=get_kolor("tickety"))
+    if not CONFIG["ticket_kategorie"]:
+        embed.description = "Brak kategorii. Kliknij **➕ Dodaj kategorię**, żeby stworzyć pierwszą."
+    else:
+        embed.description = "\n".join(_kategoria_opis_linia(k, d) for k, d in CONFIG["ticket_kategorie"].items())
+    embed.set_footer(text="Wybierz kategorię z listy, żeby ją edytować, albo dodaj nową.")
+    return embed, KategoriaGlownyView()
+
+
+def render_kategoria_detail(klucz: str):
+    dane = CONFIG["ticket_kategorie"].get(klucz)
+    if dane is None:
+        return render_kategoria_glowny()
+    embed = discord.Embed(title=dane["etykieta"], description=f"Klucz: `{klucz}`", color=get_kolor("tickety"))
+    pytania = dane.get("pytania", [])
+    if pytania:
+        tresc = "\n".join(
+            f"**{i}.** {p['tresc']} _({'długa' if p['styl'] == 'paragraph' else 'krótka'}, "
+            f"{'wymagane' if p.get('wymagane', True) else 'opcjonalne'})_"
+            for i, p in enumerate(pytania, start=1)
+        )
+    else:
+        tresc = "*Brak pytań — po kliknięciu tej kategorii ticket tworzy się od razu, bez formularza.*"
+    embed.add_field(name="📝 Pytania formularza", value=tresc, inline=False)
+    return embed, KategoriaDetailView(klucz)
+
+
+def render_usun_pytanie(klucz: str):
+    dane = CONFIG["ticket_kategorie"].get(klucz, {})
+    embed = discord.Embed(
+        title=f"🗑️ Usuń pytanie - {dane.get('etykieta', klucz)}",
+        description="Wybierz pytanie do usunięcia z listy poniżej.",
+        color=get_kolor("tickety"),
+    )
+    return embed, UsunPytanieView(klucz)
+
+
+class KategoriaGlownyView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=300)
+        if CONFIG["ticket_kategorie"]:
+            select = discord.ui.Select(
+                placeholder="Wybierz kategorię, żeby ją edytować...",
+                options=[
+                    discord.SelectOption(label=dane["etykieta"][:100], value=k, description=f"klucz: {k}")
+                    for k, dane in CONFIG["ticket_kategorie"].items()
+                ][:25],
+            )
+            select.callback = self.on_select
+            self.add_item(select)
+
+        dodaj_btn = discord.ui.Button(label="➕ Dodaj kategorię", style=discord.ButtonStyle.success)
+        dodaj_btn.callback = self.on_dodaj
+        self.add_item(dodaj_btn)
+
+    async def on_select(self, interaction: discord.Interaction):
+        klucz = interaction.data["values"][0]
+        embed, view = render_kategoria_detail(klucz)
+        await interaction.response.edit_message(embed=embed, view=view)
+
+    async def on_dodaj(self, interaction: discord.Interaction):
+        await interaction.response.send_modal(NowaKategoriaModal())
+
+
+class NowaKategoriaModal(discord.ui.Modal, title="Nowa kategoria ticketów"):
+    def __init__(self):
+        super().__init__()
+        self.klucz_input = discord.ui.TextInput(label="Krótki identyfikator (bez spacji)", placeholder="np. sklep", max_length=50)
+        self.etykieta_input = discord.ui.TextInput(label="Nazwa widoczna dla użytkownika", placeholder="np. 🛒 Sklep", max_length=100)
+        self.add_item(self.klucz_input)
+        self.add_item(self.etykieta_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        klucz = str(self.klucz_input.value).lower().strip().replace(" ", "_")
+        if klucz in CONFIG["ticket_kategorie"]:
+            await interaction.response.send_message(f"⚠️ Kategoria `{klucz}` już istnieje. Wybierz ją z listy, żeby edytować.", ephemeral=True)
+            return
+        CONFIG["ticket_kategorie"][klucz] = {"etykieta": str(self.etykieta_input.value), "pytania": []}
+        save_config()
+        embed, view = render_kategoria_detail(klucz)
+        await interaction.response.edit_message(embed=embed, view=view)
+
+
+class KategoriaDetailView(discord.ui.View):
+    def __init__(self, klucz: str):
+        super().__init__(timeout=300)
+        self.klucz = klucz
+
+        edytuj_btn = discord.ui.Button(label="✏️ Zmień nazwę", style=discord.ButtonStyle.primary, row=0)
+        edytuj_btn.callback = self.on_edytuj
+        self.add_item(edytuj_btn)
+
+        dodaj_pytanie_btn = discord.ui.Button(label="➕ Dodaj pytanie", style=discord.ButtonStyle.success, row=0)
+        dodaj_pytanie_btn.callback = self.on_dodaj_pytanie
+        self.add_item(dodaj_pytanie_btn)
+
+        if CONFIG["ticket_kategorie"].get(klucz, {}).get("pytania"):
+            usun_pytanie_btn = discord.ui.Button(label="🗑️ Usuń pytanie", style=discord.ButtonStyle.secondary, row=0)
+            usun_pytanie_btn.callback = self.on_usun_pytanie
+            self.add_item(usun_pytanie_btn)
+
+        usun_kat_btn = discord.ui.Button(label="🗑️ Usuń kategorię", style=discord.ButtonStyle.danger, row=1)
+        usun_kat_btn.callback = self.on_usun_kategoria
+        self.add_item(usun_kat_btn)
+
+        wstecz_btn = discord.ui.Button(label="🔙 Wstecz do listy", style=discord.ButtonStyle.secondary, row=1)
+        wstecz_btn.callback = self.on_wstecz
+        self.add_item(wstecz_btn)
+
+    async def on_edytuj(self, interaction: discord.Interaction):
+        await interaction.response.send_modal(ZmienNazweKategoriiModal(self.klucz))
+
+    async def on_dodaj_pytanie(self, interaction: discord.Interaction):
+        if len(CONFIG["ticket_kategorie"].get(self.klucz, {}).get("pytania", [])) >= 5:
+            await interaction.response.send_message("⚠️ Ta kategoria ma już maksymalną liczbę pytań (5 - limit Discorda).", ephemeral=True)
+            return
+        await interaction.response.send_modal(DodajPytanieModal(self.klucz))
+
+    async def on_usun_pytanie(self, interaction: discord.Interaction):
+        embed, view = render_usun_pytanie(self.klucz)
+        await interaction.response.edit_message(embed=embed, view=view)
+
+    async def on_usun_kategoria(self, interaction: discord.Interaction):
+        CONFIG["ticket_kategorie"].pop(self.klucz, None)
+        save_config()
+        embed, view = render_kategoria_glowny()
+        await interaction.response.edit_message(embed=embed, view=view)
+
+    async def on_wstecz(self, interaction: discord.Interaction):
+        embed, view = render_kategoria_glowny()
+        await interaction.response.edit_message(embed=embed, view=view)
+
+
+class UsunPytanieView(discord.ui.View):
+    def __init__(self, klucz: str):
+        super().__init__(timeout=300)
+        self.klucz = klucz
+        pytania = CONFIG["ticket_kategorie"].get(klucz, {}).get("pytania", [])
+        select = discord.ui.Select(
+            placeholder="Wybierz pytanie do usunięcia...",
+            options=[discord.SelectOption(label=p["tresc"][:100], value=str(i)) for i, p in enumerate(pytania)][:25],
+        )
+        select.callback = self.on_select
+        self.add_item(select)
+
+        wstecz_btn = discord.ui.Button(label="🔙 Anuluj", style=discord.ButtonStyle.secondary)
+        wstecz_btn.callback = self.on_wstecz
+        self.add_item(wstecz_btn)
+
+    async def on_select(self, interaction: discord.Interaction):
+        idx = int(interaction.data["values"][0])
+        pytania = CONFIG["ticket_kategorie"][self.klucz].get("pytania", [])
+        if 0 <= idx < len(pytania):
+            pytania.pop(idx)
+            save_config()
+        embed, view = render_kategoria_detail(self.klucz)
+        await interaction.response.edit_message(embed=embed, view=view)
+
+    async def on_wstecz(self, interaction: discord.Interaction):
+        embed, view = render_kategoria_detail(self.klucz)
+        await interaction.response.edit_message(embed=embed, view=view)
+
+
+class ZmienNazweKategoriiModal(discord.ui.Modal, title="Zmień nazwę kategorii"):
+    def __init__(self, klucz: str):
+        super().__init__()
+        self.klucz = klucz
+        obecna = CONFIG["ticket_kategorie"].get(klucz, {}).get("etykieta", "")
+        self.nowa_etykieta = discord.ui.TextInput(label="Nowa nazwa", default=obecna, max_length=100)
+        self.add_item(self.nowa_etykieta)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        CONFIG["ticket_kategorie"][self.klucz]["etykieta"] = str(self.nowa_etykieta.value)
+        save_config()
+        embed, view = render_kategoria_detail(self.klucz)
+        await interaction.response.edit_message(embed=embed, view=view)
+
+
+class DodajPytanieModal(discord.ui.Modal, title="Dodaj pytanie do formularza"):
+    def __init__(self, klucz: str):
+        super().__init__()
+        self.klucz = klucz
+        self.tresc_input = discord.ui.TextInput(label="Treść pytania", max_length=45, placeholder="np. Nick gracza")
+        self.placeholder_input = discord.ui.TextInput(label="Podpowiedź w polu (opcjonalnie)", required=False, max_length=100)
+        self.typ_input = discord.ui.TextInput(label="Typ odpowiedzi: krotkie / dlugie", default="krotkie", max_length=10)
+        self.wymagane_input = discord.ui.TextInput(label="Czy wymagane? tak / nie", default="tak", max_length=5)
+        self.add_item(self.tresc_input)
+        self.add_item(self.placeholder_input)
+        self.add_item(self.typ_input)
+        self.add_item(self.wymagane_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        styl = "paragraph" if str(self.typ_input.value).strip().lower().startswith("d") else "short"
+        wymagane = not str(self.wymagane_input.value).strip().lower().startswith("n")
+        pytania = CONFIG["ticket_kategorie"][self.klucz].setdefault("pytania", [])
+        if len(pytania) >= 5:
+            await interaction.response.send_message("⚠️ Osiągnięto limit 5 pytań dla tej kategorii.", ephemeral=True)
+            return
+        pytania.append({
+            "tresc": str(self.tresc_input.value),
+            "styl": styl,
+            "wymagane": wymagane,
+            "placeholder": str(self.placeholder_input.value) if self.placeholder_input.value else "",
+            "max_length": 1000 if styl == "paragraph" else 100,
+        })
+        save_config()
+        embed, view = render_kategoria_detail(self.klucz)
+        await interaction.response.edit_message(embed=embed, view=view)
+
+
+@tickety_group.command(name="kategorie", description="Otwiera panel do zarządzania kategoriami ticketów (lista + przyciski)")
+async def tickety_kategorie_cmd(interaction: discord.Interaction):
+    if not is_admin(interaction):
+        await interaction.response.send_message("⚠️ Brak uprawnień.", ephemeral=True)
+        return
+    embed, view = render_kategoria_glowny()
+    await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
 
 
 # ========================
@@ -1006,6 +1441,28 @@ class UczestnicyKonkursButton(discord.ui.Button):
                           custom_id=f"igrzyskamc:konkurs:licznik:{konkurs_id}", disabled=True)
 
 
+class OdbierzNagrodeButton(discord.ui.Button):
+    """Przycisk widoczny po zakończeniu konkursu - klikalny WYŁĄCZNIE przez zwycięzcę(ów).
+    Tworzy dla niego prywatny ticket, w którym może odebrać nagrodę pisząc do administracji."""
+
+    def __init__(self, konkurs_id: str):
+        super().__init__(label="Odbierz nagrodę", emoji="🎁", style=discord.ButtonStyle.success,
+                          custom_id=f"igrzyskamc:konkurs:odbierz:{konkurs_id}")
+        self.konkurs_id = konkurs_id
+
+    async def callback(self, interaction: discord.Interaction):
+        wpis = konkurs_wpis(self.konkurs_id)
+        if not wpis or not wpis.get("zakonczony"):
+            await interaction.response.send_message("⚠️ Ten konkurs jeszcze się nie zakończył.", ephemeral=True)
+            return
+        if interaction.user.id not in wpis.get("zwyciezcy", []):
+            await interaction.response.send_message("⚠️ Nie jesteś zwycięzcą tego konkursu.", ephemeral=True)
+            return
+        etykieta = f"🎁 Odbiór nagrody — konkurs #{self.konkurs_id}"
+        await utworz_ticket(interaction, "odbior_nagrody", etykieta,
+                             odpowiedzi={"Nagroda": wpis["nagroda"], "Konkurs": f"#{self.konkurs_id}"})
+
+
 def build_konkurs_panel(konkurs_id: str) -> PanelView:
     wpis = konkurs_wpis(konkurs_id)
     ilosc_uczestnikow = len(wpis.get("uczestnicy", []))
@@ -1026,21 +1483,24 @@ def build_konkurs_panel(konkurs_id: str) -> PanelView:
         linie.append(f"🔒 **Wymagana rola:** <@&{wpis['wymagana_rola']}>")
     linie.append(f"🧑‍🎤 **Organizator:** <@{wpis['host_id']}>")
 
+    zwyciezcy = wpis.get("zwyciezcy", []) if zakonczony else []
     if zakonczony:
-        zwyciezcy = wpis.get("zwyciezcy", [])
         if zwyciezcy:
             wzmianki = ", ".join(f"<@{uid}>" for uid in zwyciezcy)
             linie.append(f"\n🏆 **Zwycięzca(y):** {wzmianki}")
+            linie.append("» Zwycięzco, kliknij **🎁 Odbierz nagrodę** niżej, aby otworzyć ticket do administracji!")
         else:
             linie.append("\n🏆 **Zwycięzcy:** Brak (za mało uczestników).")
 
     opis = "\n".join(linie)
 
-    dolacz = DolaczKonkursButton(konkurs_id, disabled=zakonczony)
-    licznik = UczestnicyKonkursButton(konkurs_id, ilosc_uczestnikow)
+    if zakonczony and zwyciezcy:
+        items = [OdbierzNagrodeButton(konkurs_id)]
+    else:
+        items = [DolaczKonkursButton(konkurs_id, disabled=zakonczony), UczestnicyKonkursButton(konkurs_id, ilosc_uczestnikow)]
     obrazek = CONFIG["obrazki"].get("konkursy") or None
 
-    return PanelView("Konkurs", opis, "konkursy", items=[dolacz, licznik], obrazek_url=obrazek)
+    return PanelView("Konkurs", opis, "konkursy", items=items, obrazek_url=obrazek)
 
 
 async def wylosuj_zwyciezcow(wpis: dict) -> List[int]:
@@ -1220,95 +1680,6 @@ async def konkurs_lista(interaction: discord.Interaction):
     await interaction.response.send_message(view=PanelView("Aktywne Konkursy", "\n".join(linie)[:3900], "konkursy"), ephemeral=True)
 
 
-# ========================
-#   OGŁOSZENIA (styl changelogu - klasyczny embed, tak jak w bocie-wzorze)
-# ========================
-
-ogloszenie_group = app_commands.Group(name="ogloszenie", description="Wysyła / edytuje / usuwa ogłoszenie w stylu changelogu")
-
-
-def build_ogloszenie_embed(tytul: str, tresc: str) -> discord.Embed:
-    punkty = "\n".join(f"• {linia.strip()}" for linia in tresc.split("\\n") if linia.strip())
-    return karta(tytul, punkty, CONFIG["kolory"]["info"])
-
-
-@ogloszenie_group.command(name="wyslij", description="Wysyła ogłoszenie w stylu changelogu")
-@app_commands.describe(tytul="Tytuł, np. 'ChestPvP | Nowość'", tresc="Treść (użyj \\n dla nowej linijki / punktu)")
-async def ogloszenie_wyslij(interaction: discord.Interaction, tytul: str, tresc: str,
-                             kanal: Optional[discord.TextChannel] = None):
-    if not is_staff(interaction):
-        await interaction.response.send_message("⚠️ Brak uprawnień.", ephemeral=True)
-        return
-    docelowy = kanal
-    if docelowy is None:
-        kanal_id = CONFIG["kanaly"].get("ogloszenia")
-        docelowy = interaction.guild.get_channel(kanal_id) if kanal_id else interaction.channel
-
-    embed = build_ogloszenie_embed(tytul, tresc)
-    wiadomosc = await docelowy.send(embed=embed)
-
-    ogloszenie_id = nastepne_id("ogloszenie")
-    CONFIG["ogloszenia_dane"][ogloszenie_id] = {
-        "kanal_id": docelowy.id, "message_id": wiadomosc.id, "tytul": tytul, "tresc": tresc,
-    }
-    save_config()
-
-    await interaction.response.send_message(f"✅ Ogłoszenie **#{ogloszenie_id}** wysłane na {docelowy.mention}.", ephemeral=True)
-
-
-@ogloszenie_group.command(name="edytuj", description="Edytuje wcześniej wysłane ogłoszenie")
-@app_commands.describe(id="ID ogłoszenia (widoczne w /ogloszenie lista)")
-async def ogloszenie_edytuj(interaction: discord.Interaction, id: str, tytul: str, tresc: str):
-    if not is_staff(interaction):
-        await interaction.response.send_message("⚠️ Brak uprawnień.", ephemeral=True)
-        return
-    wpis = CONFIG["ogloszenia_dane"].get(id)
-    if not wpis:
-        await interaction.response.send_message("⚠️ Nie znaleziono ogłoszenia o takim ID.", ephemeral=True)
-        return
-    try:
-        kanal = interaction.guild.get_channel(wpis["kanal_id"])
-        wiadomosc = await kanal.fetch_message(wpis["message_id"])
-        await wiadomosc.edit(embed=build_ogloszenie_embed(tytul, tresc))
-    except (discord.NotFound, discord.Forbidden, discord.HTTPException, AttributeError):
-        await interaction.response.send_message("⚠️ Nie udało się znaleźć/edytować oryginalnej wiadomości.", ephemeral=True)
-        return
-    wpis["tytul"] = tytul
-    wpis["tresc"] = tresc
-    save_config()
-    await interaction.response.send_message(f"✅ Zaktualizowano ogłoszenie **#{id}**.", ephemeral=True)
-
-
-@ogloszenie_group.command(name="usun", description="Usuwa wysłane ogłoszenie")
-@app_commands.describe(id="ID ogłoszenia (widoczne w /ogloszenie lista)")
-async def ogloszenie_usun(interaction: discord.Interaction, id: str):
-    if not is_staff(interaction):
-        await interaction.response.send_message("⚠️ Brak uprawnień.", ephemeral=True)
-        return
-    wpis = CONFIG["ogloszenia_dane"].pop(id, None)
-    if not wpis:
-        await interaction.response.send_message("⚠️ Nie znaleziono ogłoszenia o takim ID.", ephemeral=True)
-        return
-    save_config()
-    try:
-        kanal = interaction.guild.get_channel(wpis["kanal_id"])
-        wiadomosc = await kanal.fetch_message(wpis["message_id"])
-        await wiadomosc.delete()
-    except (discord.NotFound, discord.Forbidden, discord.HTTPException, AttributeError):
-        pass
-    await interaction.response.send_message(f"✅ Usunięto ogłoszenie **#{id}**.", ephemeral=True)
-
-
-@ogloszenie_group.command(name="lista", description="Wyświetla listę wysłanych ogłoszeń")
-async def ogloszenie_lista(interaction: discord.Interaction):
-    if not CONFIG["ogloszenia_dane"]:
-        await interaction.response.send_message("📋 Brak wysłanych ogłoszeń.", ephemeral=True)
-        return
-    linie = [f"**#{oid}** — {w['tytul']}" for oid, w in CONFIG["ogloszenia_dane"].items()]
-    await interaction.response.send_message("\n".join(linie)[:1900], ephemeral=True)
-
-
-# ========================
 #   KONFIGURACJA
 # ========================
 
@@ -1333,7 +1704,6 @@ async def konfig_nazwa(interaction: discord.Interaction, nazwa: str):
     app_commands.Choice(name="Propozycje (auto-zamiana wiadomości!)", value="propozycje"),
     app_commands.Choice(name="Ankiety (auto-zamiana wiadomości!)", value="ankiety"),
     app_commands.Choice(name="Błędy", value="bledy"),
-    app_commands.Choice(name="Ogłoszenia", value="ogloszenia"),
     app_commands.Choice(name="Powitania", value="powitania"),
     app_commands.Choice(name="Konkursy (domyślny kanał)", value="konkursy"),
 ])
@@ -1376,7 +1746,6 @@ async def konfig_rola(interaction: discord.Interaction, typ: app_commands.Choice
 @app_commands.choices(sekcja=[
     app_commands.Choice(name="Propozycje", value="propozycje"),
     app_commands.Choice(name="Błędy", value="bledy"),
-    app_commands.Choice(name="Info / Ogłoszenia", value="info"),
     app_commands.Choice(name="Ankiety", value="ankiety"),
     app_commands.Choice(name="Pomoc / Centrum Pomocy", value="pomoc"),
     app_commands.Choice(name="Tickety", value="tickety"),
@@ -1439,9 +1808,12 @@ POMOC_KATEGORIE = {
     "tickety": {
         "etykieta": "🎫 Tickety",
         "tresc": (
-            "`/tickety panel [kanal]` — Wysyła panel z wyborem kategorii ticketu. *(Admin)*\n\n"
-            "Ticket tworzy się automatycznie po wybraniu kategorii przez gracza — prywatny kanał "
-            "widoczny tylko dla autora i roli Staff. Można w nim swobodnie wysyłać zdjęcia.\n\n"
+            "`/tickety panel [kanal]` — Wysyła panel z wyborem kategorii ticketu. *(Admin)*\n"
+            "`/tickety kategorie` — Otwiera interaktywny panel do zarządzania kategoriami "
+            "(dodawanie/usuwanie kategorii, zmiana nazwy, formularz pytań przed utworzeniem ticketu). *(Admin)*\n\n"
+            "Ticket tworzy się automatycznie po wybraniu kategorii przez gracza (lub po wypełnieniu "
+            "formularza, jeśli kategoria go ma) — prywatny kanał widoczny tylko dla autora i roli Staff. "
+            "Można w nim swobodnie wysyłać zdjęcia.\n\n"
             "Przycisk **🔒 Zamknij ticket** zapisuje transkrypt (jeśli ustawiono kanał logów) i "
             "usuwa kanał po 5 sekundach."
         ),
@@ -1465,7 +1837,8 @@ POMOC_KATEGORIE = {
             "`/propozycje usun <id>` — Usuwa propozycję. *(Staff)*\n\n"
             "**Najprościej:** ustaw kanał propozycji w `/konfiguracja kanal` — każda wiadomość "
             "napisana tam (tekst i/lub zdjęcie) sama zamieni się w kartę propozycji z reakcjami 👍/👎. "
-            "Przycisk z panelu robi to samo przez okienko (bez zdjęcia)."
+            "Pod każdą kartą są też przyciski **📝 Napisz swoją propozycję** i **🔔 Powiadamiaj o nowych "
+            "propozycjach** (włącza/wyłącza rolę powiadomień, ustawianą przez `/konfiguracja rola`)."
         ),
     },
     "bledy": {
@@ -1473,7 +1846,9 @@ POMOC_KATEGORIE = {
         "tresc": (
             "`/bledy panel [kanal]` — Wysyła panel z przyciskiem 'Zgłoś błąd'. *(Admin)*\n"
             "`/bledy status <id> <status>` — Zmienia status zgłoszenia. *(Staff)*\n"
-            "`/bledy usun <id>` — Usuwa zgłoszenie. *(Staff)*"
+            "`/bledy usun <id>` — Usuwa zgłoszenie. *(Staff)*\n\n"
+            "**Najprościej:** ustaw kanał błędów w `/konfiguracja kanal` — każda wiadomość napisana "
+            "tam (tekst i/lub zdjęcie) sama zamieni się w kartę zgłoszenia, bez przycisków tak/nie."
         ),
     },
     "ankiety": {
@@ -1484,16 +1859,6 @@ POMOC_KATEGORIE = {
             "tam zamienia się w ankietę tak/nie. Liczbę głosów pokazują natywne reakcje ✅/❌ Discorda."
         ),
     },
-    "ogloszenia": {
-        "etykieta": "📢 Ogłoszenia",
-        "tresc": (
-            "`/ogloszenie wyslij <tytul> <tresc> [kanal]` — Wysyła ogłoszenie w stylu changelogu. "
-            "W treści użyj `\\n`, żeby rozbić tekst na osobne punkty. *(Staff)*\n"
-            "`/ogloszenie edytuj <id> <tytul> <tresc>` — Edytuje wysłane ogłoszenie. *(Staff)*\n"
-            "`/ogloszenie usun <id>` — Usuwa wysłane ogłoszenie. *(Staff)*\n"
-            "`/ogloszenie lista` — Pokazuje listę wysłanych ogłoszeń z ID."
-        ),
-    },
     "konkursy": {
         "etykieta": "🎉 Konkursy",
         "tresc": (
@@ -1502,7 +1867,9 @@ POMOC_KATEGORIE = {
             "`/konkurs zakoncz <id>` — Kończy konkurs przed czasem i losuje zwycięzców. *(Staff)*\n"
             "`/konkurs reroll <id>` — Losuje nowych zwycięzców ponownie. *(Staff)*\n"
             "`/konkurs usun <id>` — Usuwa konkurs bez losowania. *(Staff)*\n"
-            "`/konkurs lista` — Wyświetla listę aktywnych konkursów."
+            "`/konkurs lista` — Wyświetla listę aktywnych konkursów.\n\n"
+            "Po zakończeniu konkursu przycisk zmienia się w **🎁 Odbierz nagrodę** - działa "
+            "wyłącznie dla zwycięzcy(ów) i od razu tworzy dla niego prywatny ticket do odbioru nagrody."
         ),
     },
     "powitania": {
@@ -1519,8 +1886,9 @@ POMOC_KATEGORIE = {
         "tresc": (
             "`/konfiguracja nazwa <nazwa>` — Nazwa w nagłówkach i stopkach kart. *(Admin)*\n"
             "`/konfiguracja kanal <typ> <kanal>` — Kanał modułu (tickety, propozycje, ankiety, "
-            "błędy, centrum pomocy, log ticketów, ogłoszenia, powitania, konkursy). *(Admin)*\n"
-            "`/konfiguracja kategoria-ticketow <kategoria>` — Kategoria, w której tworzą się tickety. *(Admin)*\n"
+            "błędy, centrum pomocy, log ticketów, powitania, konkursy). *(Admin)*\n"
+            "`/konfiguracja kategoria-ticketow <kategoria>` — Kategoria kanałów, w której tworzą się tickety. *(Admin)*\n"
+            "`/tickety kategorie` — Zarządzanie kategoriami ticketów (nazwy, formularze pytań). *(Admin)*\n"
             "`/konfiguracja rola <typ> <rola>` — Rola Staff / powiadomień. *(Admin)*\n"
             "`/konfiguracja kolor <sekcja> <hex>` — Kolor karty danej sekcji, np. `#5865F2`. *(Admin)*\n"
             "`/konfiguracja obrazek <typ> <url>` — Obrazek dla powitań/konkursów. *(Admin)*\n"
@@ -1574,7 +1942,6 @@ bot.tree.add_command(centrumpomocy_group)
 bot.tree.add_command(ankieta_group)
 bot.tree.add_command(tickety_group)
 bot.tree.add_command(konfiguracja_group)
-bot.tree.add_command(ogloszenie_group)
 bot.tree.add_command(konkurs_group)
 
 
@@ -1582,20 +1949,23 @@ bot.tree.add_command(konkurs_group)
 async def on_ready():
     bot.add_view(ZgloszeniePanel("propozycja"))
     bot.add_view(ZgloszeniePanel("blad"))
+    bot.add_view(PropozycjaKartaGlobalView())
     bot.add_view(CentrumPomocyPanel())
     bot.add_view(TicketyPanel())
 
     for numer, wpis in list(CONFIG["tickety_dane"].items()):
         if not wpis.get("zamkniety"):
-            bot.add_view(build_ticket_panel(numer, wpis.get("kategoria", "Inne"), wpis.get("autor_id", 0)))
+            bot.add_view(build_ticket_panel(numer, wpis.get("kategoria", "Inne"), wpis.get("autor_id", 0),
+                                             odpowiedzi=wpis.get("odpowiedzi") or None))
 
     teraz = datetime.datetime.now(datetime.timezone.utc).timestamp()
     for konkurs_id, wpis in list(CONFIG["konkursy_dane"].items()):
-        if not wpis.get("zakonczony"):
-            if wpis.get("koniec", 0) <= teraz:
-                await zakoncz_konkurs(bot, konkurs_id)
-            elif wpis.get("message_id"):
-                bot.add_view(build_konkurs_panel(konkurs_id), message_id=wpis["message_id"])
+        if not wpis.get("zakonczony") and wpis.get("koniec", 0) <= teraz:
+            await zakoncz_konkurs(bot, konkurs_id)
+        elif wpis.get("message_id"):
+            # Rejestrujemy zarówno aktywne konkursy (przycisk dołączania), jak i zakończone
+            # (przycisk "Odbierz nagrodę") - build_konkurs_panel sam dobiera właściwe przyciski.
+            bot.add_view(build_konkurs_panel(konkurs_id), message_id=wpis["message_id"])
 
     if not sprawdzaj_konkursy.is_running():
         sprawdzaj_konkursy.start()
