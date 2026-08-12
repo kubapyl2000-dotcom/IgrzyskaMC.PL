@@ -16,6 +16,10 @@ Wymagane zmienne środowiskowe:
   automatycznie w kartę zgłoszenia błędu - bez przycisków głosowania (tak/nie).
 - Ankiety: ustaw kanał (/konfiguracja kanal Ankiety). Każda wiadomość na tym kanale zamienia
   się w ankietę tak/nie - liczbę głosów pokazują natywne reakcje ✅ / ❌ Discorda.
+- Nowości: ustaw kanał (/konfiguracja kanal Nowości). Każda wiadomość napisana tam zamienia
+  się automatycznie w kartę ogłoszenia (design jak changelog - kolorowy pasek z boku, tytuł,
+  wypunktowana treść, stopka z copyrightem i datą). Pierwsza linia wiadomości = tytuł/kategoria
+  nowości (np. "ChestPvP"), reszta linii = punkty zmian (każda linia staje się osobnym • punktem).
 - Tickety: kategorie (nazwa + opcjonalny formularz pytań) w pełni edytowalne komendą
   /tickety kategorie - interaktywny panel z przyciskami (dodaj/edytuj/usuń).
 - Kolory bocznego paska każdej sekcji (w tym ticketów) zmienisz komendą /konfiguracja kolor.
@@ -53,6 +57,7 @@ DEFAULT_CONFIG = {
         "tickety": 0x5865F2,
         "powitanie": 0x57F287,
         "konkursy": 0x57F287,
+        "nowosci": 0x57F287,
     },
 
     "obrazki": {
@@ -70,6 +75,7 @@ DEFAULT_CONFIG = {
         "bledy": 0,
         "powitania": 0,
         "konkursy": 0,
+        "nowosci": 0,
     },
 
     "role": {
@@ -339,7 +345,10 @@ class ZgloszenieModal(discord.ui.Modal):
         }
         save_config()
 
-        wiadomosc = await kanal.send(view=build_zgloszenie_panelview(self.typ, wpis_id))
+        widok_karty = build_zgloszenie_panelview(self.typ, wpis_id)
+        wiadomosc = await kanal.send(view=widok_karty)
+        if self.typ == "propozycja":
+            bot.add_view(widok_karty)  # rejestracja "Przyjęta"/"Odrzucona" - przetrwa restart bota
         for reakcja in dane["reakcje"]:
             try:
                 await wiadomosc.add_reaction(reakcja)
@@ -395,10 +404,54 @@ class PowiadamiajPropozycjeButton(discord.ui.Button):
             await interaction.response.send_message("🔔 Będziesz teraz otrzymywać powiadomienia o nowych propozycjach!", ephemeral=True)
 
 
+class PrzyjmijPropozycjeButton(discord.ui.Button):
+    """Przycisk widoczny na każdej karcie propozycji - tylko dla staffu/adminów. Ustawia
+    status na 'Przyjęta ✅' bez potrzeby używania komendy /propozycje status."""
+
+    def __init__(self, wpis_id: str):
+        super().__init__(label="Przyjęta", emoji="✅", style=discord.ButtonStyle.success,
+                          custom_id=f"igrzyskamc:propozycja:przyjmij:{wpis_id}")
+        self.wpis_id = wpis_id
+
+    async def callback(self, interaction: discord.Interaction):
+        if not is_staff(interaction):
+            await interaction.response.send_message("⚠️ Brak uprawnień.", ephemeral=True)
+            return
+        wpis = CONFIG["propozycje_dane"].get(self.wpis_id)
+        if not wpis:
+            await interaction.response.send_message("⚠️ Nie znaleziono tej propozycji (mogła zostać usunięta).", ephemeral=True)
+            return
+        wpis["status"] = "Przyjęta ✅"
+        save_config()
+        await interaction.response.edit_message(view=build_zgloszenie_panelview("propozycja", self.wpis_id))
+
+
+class OdrzucPropozycjeButton(discord.ui.Button):
+    """Jak wyżej, ale ustawia status na 'Odrzucona ❌' - też tylko dla staffu/adminów."""
+
+    def __init__(self, wpis_id: str):
+        super().__init__(label="Odrzucona", emoji="❌", style=discord.ButtonStyle.danger,
+                          custom_id=f"igrzyskamc:propozycja:odrzuc:{wpis_id}")
+        self.wpis_id = wpis_id
+
+    async def callback(self, interaction: discord.Interaction):
+        if not is_staff(interaction):
+            await interaction.response.send_message("⚠️ Brak uprawnień.", ephemeral=True)
+            return
+        wpis = CONFIG["propozycje_dane"].get(self.wpis_id)
+        if not wpis:
+            await interaction.response.send_message("⚠️ Nie znaleziono tej propozycji (mogła zostać usunięta).", ephemeral=True)
+            return
+        wpis["status"] = "Odrzucona ❌"
+        save_config()
+        await interaction.response.edit_message(view=build_zgloszenie_panelview("propozycja", self.wpis_id))
+
+
 class PropozycjaKartaGlobalView(discord.ui.View):
     """Rejestrowany raz globalnie (bez message_id) - obsługuje przyciski 'Napisz swoją
     propozycję' i 'Powiadamiaj o nowych propozycjach' na KAŻDEJ karcie propozycji naraz,
-    bo ich zachowanie nie zależy od konkretnej wiadomości/ID."""
+    bo ich zachowanie nie zależy od konkretnej wiadomości/ID. Przyciski 'Przyjęta'/'Odrzucona'
+    mają unikalne custom_id (z ID propozycji), więc rejestrują się osobno przy każdej karcie."""
 
     def __init__(self):
         super().__init__(timeout=None)
@@ -421,8 +474,11 @@ def build_zgloszenie_panelview(typ: str, wpis_id: str) -> PanelView:
     opis = "\n".join(linie)
 
     # Karty propozycji mają pod spodem te same dwa przyciski co panel ("Napisz swoją
-    # propozycję" i "Powiadamiaj o nowych propozycjach") - dokładnie jak na wzorze.
-    items = [NapiszPropozycjeKartaButton(), PowiadamiajPropozycjeButton()] if typ == "propozycja" else None
+    # propozycję" i "Powiadamiaj o nowych propozycjach") - dokładnie jak na wzorze - a do
+    # tego dwa przyciski tylko dla staffu/adminów ("Przyjęta"/"Odrzucona"), żeby zmieniać
+    # status jednym kliknięciem, bez komend.
+    items = [NapiszPropozycjeKartaButton(), PowiadamiajPropozycjeButton(),
+             PrzyjmijPropozycjeButton(wpis_id), OdrzucPropozycjeButton(wpis_id)] if typ == "propozycja" else None
 
     return PanelView(dane["sekcja"], opis, dane["kolor"], items=items, obrazek_url=wpis.get("obrazek"))
 
@@ -490,43 +546,6 @@ async def propozycje_panel(interaction: discord.Interaction, kanal: Optional[dis
         docelowy = interaction.guild.get_channel(kanal_id) if kanal_id else interaction.channel
     await docelowy.send(view=ZgloszeniePanel("propozycja"))
     await interaction.response.send_message(f"✅ Panel propozycji wysłany na {docelowy.mention}.", ephemeral=True)
-
-
-@propozycje_group.command(name="status", description="Zmienia status propozycji")
-@app_commands.describe(id="ID propozycji")
-@app_commands.choices(status=[
-    app_commands.Choice(name="Rozpatrywana", value="Rozpatrywana"),
-    app_commands.Choice(name="Przyjęta ✅", value="Przyjęta ✅"),
-    app_commands.Choice(name="Odrzucona ❌", value="Odrzucona ❌"),
-])
-async def propozycje_status(interaction: discord.Interaction, id: str, status: app_commands.Choice[str]):
-    if not is_staff(interaction):
-        await interaction.response.send_message("⚠️ Brak uprawnień.", ephemeral=True)
-        return
-    ok = await zmien_status_zgloszenia(bot, "propozycja", id, status.value)
-    if not ok:
-        await interaction.response.send_message("⚠️ Nie znaleziono propozycji o takim ID.", ephemeral=True)
-        return
-    await interaction.response.send_message(f"✅ Status propozycji **#{id}** zmieniony na: {status.value}", ephemeral=True)
-
-
-@propozycje_group.command(name="usun", description="Usuwa propozycję")
-async def propozycje_usun(interaction: discord.Interaction, id: str):
-    if not is_staff(interaction):
-        await interaction.response.send_message("⚠️ Brak uprawnień.", ephemeral=True)
-        return
-    wpis = CONFIG["propozycje_dane"].pop(id, None)
-    if not wpis:
-        await interaction.response.send_message("⚠️ Nie znaleziono propozycji o takim ID.", ephemeral=True)
-        return
-    save_config()
-    try:
-        kanal = interaction.guild.get_channel(wpis["kanal_id"])
-        wiadomosc = await kanal.fetch_message(wpis["message_id"])
-        await wiadomosc.delete()
-    except (discord.NotFound, discord.Forbidden, discord.HTTPException, AttributeError):
-        pass
-    await interaction.response.send_message(f"✅ Usunięto propozycję **#{id}**.", ephemeral=True)
 
 
 @bledy_group.command(name="panel", description="Wysyła panel zgłaszania błędów")
@@ -613,7 +632,9 @@ async def obsluz_wiadomosc_propozycji(message: discord.Message):
     except (discord.Forbidden, discord.NotFound):
         pass
 
-    wiadomosc = await message.channel.send(view=build_zgloszenie_panelview("propozycja", wpis_id))
+    widok_karty = build_zgloszenie_panelview("propozycja", wpis_id)
+    wiadomosc = await message.channel.send(view=widok_karty)
+    bot.add_view(widok_karty)  # rejestracja "Przyjęta"/"Odrzucona" - przetrwa restart bota
     for reakcja in ZGLOSZENIA_TYPY["propozycja"]["reakcje"]:
         try:
             await wiadomosc.add_reaction(reakcja)
@@ -715,6 +736,57 @@ async def obsluz_wiadomosc_ankiety(message: discord.Message):
     save_config()
 
 
+async def obsluz_wiadomosc_nowosci(message: discord.Message):
+    """Dokładnie jak z propozycjami/błędami/ankietami: napisz na wyznaczonym kanale, a bot
+    sam zamieni to w kartę ogłoszenia (design changelogu - kolorowy pasek z boku, tytuł,
+    wypunktowana treść, stopka z copyrightem i datą - dokładnie jak na wzorze).
+
+    Pierwsza linia wiadomości = tytuł/kategoria nowości (np. "ChestPvP"), reszta linii =
+    punkty zmian (każda niepusta linia staje się osobnym punktem "•", chyba że już zaczyna
+    się od •/-/*)."""
+    tresc = message.content.strip()
+    obrazek = znajdz_obrazek(message)
+    if not tresc and not obrazek:
+        try:
+            await message.delete()
+        except (discord.Forbidden, discord.NotFound):
+            pass
+        return
+
+    linie_wiad = [l for l in tresc.split("\n")] if tresc else []
+    tytul = linie_wiad[0].strip() if linie_wiad and linie_wiad[0].strip() else "Aktualizacja"
+    reszta = linie_wiad[1:] if len(linie_wiad) > 1 else []
+
+    punkty = []
+    for linia in reszta:
+        linia = linia.strip()
+        if not linia:
+            continue
+        if linia.startswith(("•", "-", "*")):
+            linia = linia.lstrip("•-* ").strip()
+        punkty.append(f"• {linia}")
+
+    if punkty:
+        opis = "\n\n".join(punkty)
+    elif obrazek and len(linie_wiad) <= 1:
+        opis = "\u200b"
+    else:
+        opis = "*(brak treści)*"
+
+    try:
+        await message.delete()
+    except (discord.Forbidden, discord.NotFound):
+        pass
+
+    nazwa = CONFIG.get("nazwa_serwera", "Bot")
+    rok = datetime.datetime.now().year
+    embed = karta(f"📦 {tytul} | Nowość", opis, CONFIG["kolory"].get("nowosci", 0x57F287),
+                  stopka=f"© Copyright {nazwa} - {rok}")
+    if obrazek:
+        embed.set_image(url=obrazek)
+    await message.channel.send(embed=embed)
+
+
 @bot.event
 async def on_message(message: discord.Message):
     if message.author.bot or not message.guild:
@@ -734,6 +806,27 @@ async def on_message(message: discord.Message):
     if kanal_ankiety and message.channel.id == kanal_ankiety:
         await obsluz_wiadomosc_ankiety(message)
         return
+
+    kanal_nowosci = CONFIG["kanaly"].get("nowosci")
+    if kanal_nowosci and message.channel.id == kanal_nowosci:
+        await obsluz_wiadomosc_nowosci(message)
+        return
+
+
+nowosci_group = app_commands.Group(name="nowosci", description="Moduł nowości / aktualizacji")
+
+
+@nowosci_group.command(name="ustawkanal", description="Ustawia kanał nowości (auto-zamiana wiadomości na kartę ogłoszenia)")
+async def nowosci_ustawkanal(interaction: discord.Interaction, kanal: discord.TextChannel):
+    if not is_admin(interaction):
+        await interaction.response.send_message("⚠️ Brak uprawnień.", ephemeral=True)
+        return
+    CONFIG["kanaly"]["nowosci"] = kanal.id
+    save_config()
+    await interaction.response.send_message(
+        f"✅ Kanał nowości ustawiony na {kanal.mention}. Każda wiadomość napisana tam "
+        "(pierwsza linia = tytuł, reszta = punkty zmian) zamieni się automatycznie w kartę ogłoszenia.",
+        ephemeral=True)
 
 
 ankieta_group = app_commands.Group(name="ankieta", description="Zarządzanie ankietami")
@@ -1751,6 +1844,7 @@ async def konfig_rola(interaction: discord.Interaction, typ: app_commands.Choice
     app_commands.Choice(name="Tickety", value="tickety"),
     app_commands.Choice(name="Powitania", value="powitanie"),
     app_commands.Choice(name="Konkursy", value="konkursy"),
+    app_commands.Choice(name="Nowości", value="nowosci"),
 ])
 async def konfig_kolor(interaction: discord.Interaction, sekcja: app_commands.Choice[str], hex: str):
     if not is_admin(interaction):
@@ -1832,13 +1926,23 @@ POMOC_KATEGORIE = {
     "propozycje": {
         "etykieta": "💡 Propozycje",
         "tresc": (
-            "`/propozycje panel [kanal]` — Wysyła panel z przyciskiem 'Napisz swoją propozycję'. *(Admin)*\n"
-            "`/propozycje status <id> <status>` — Zmienia status propozycji. *(Staff)*\n"
-            "`/propozycje usun <id>` — Usuwa propozycję. *(Staff)*\n\n"
+            "`/propozycje panel [kanal]` — Wysyła panel z przyciskiem 'Napisz swoją propozycję'. *(Admin)*\n\n"
             "**Najprościej:** ustaw kanał propozycji w `/konfiguracja kanal` — każda wiadomość "
             "napisana tam (tekst i/lub zdjęcie) sama zamieni się w kartę propozycji z reakcjami 👍/👎. "
-            "Pod każdą kartą są też przyciski **📝 Napisz swoją propozycję** i **🔔 Powiadamiaj o nowych "
-            "propozycjach** (włącza/wyłącza rolę powiadomień, ustawianą przez `/konfiguracja rola`)."
+            "Pod każdą kartą są przyciski **📝 Napisz swoją propozycję** i **🔔 Powiadamiaj o nowych "
+            "propozycjach** (włącza/wyłącza rolę powiadomień, ustawianą przez `/konfiguracja rola`), a "
+            "dla staffu/adminów dodatkowo **✅ Przyjęta** i **❌ Odrzucona** - jedno kliknięcie zmienia "
+            "status."
+        ),
+    },
+    "nowosci": {
+        "etykieta": "📦 Nowości",
+        "tresc": (
+            "`/nowosci ustawkanal <kanal>` — Ustawia kanał nowości. *(Admin)*\n\n"
+            "**Najprościej:** po ustawieniu kanału, każda wiadomość napisana tam (tekst i/lub "
+            "zdjęcie) sama zamieni się w kartę ogłoszenia w stylu changelogu. Pierwsza linia "
+            "wiadomości to tytuł/kategoria nowości (np. „ChestPvP”), a każda kolejna linia staje "
+            "się osobnym punktem zmian (•). Kolor karty zmienisz przez `/konfiguracja kolor`."
         ),
     },
     "bledy": {
@@ -1937,6 +2041,7 @@ async def pomoc_cmd(interaction: discord.Interaction):
 # ========================
 
 bot.tree.add_command(propozycje_group)
+bot.tree.add_command(nowosci_group)
 bot.tree.add_command(bledy_group)
 bot.tree.add_command(centrumpomocy_group)
 bot.tree.add_command(ankieta_group)
@@ -1952,6 +2057,9 @@ async def on_ready():
     bot.add_view(PropozycjaKartaGlobalView())
     bot.add_view(CentrumPomocyPanel())
     bot.add_view(TicketyPanel())
+
+    for wpis_id in list(CONFIG["propozycje_dane"].keys()):
+        bot.add_view(build_zgloszenie_panelview("propozycja", wpis_id))  # przetrwanie "Przyjęta"/"Odrzucona"
 
     for numer, wpis in list(CONFIG["tickety_dane"].items()):
         if not wpis.get("zamkniety"):
