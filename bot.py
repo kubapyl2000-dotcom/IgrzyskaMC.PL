@@ -16,10 +16,10 @@ Wymagane zmienne środowiskowe:
   automatycznie w kartę zgłoszenia błędu - bez przycisków głosowania (tak/nie).
 - Ankiety: ustaw kanał (/konfiguracja kanal Ankiety). Każda wiadomość na tym kanale zamienia
   się w ankietę tak/nie - liczbę głosów pokazują natywne reakcje ✅ / ❌ Discorda.
-- Nowości: ustaw kanał (/konfiguracja kanal Nowości). Każda wiadomość napisana tam zamienia
-  się automatycznie w kartę ogłoszenia (design jak changelog - kolorowy pasek z boku, tytuł,
-  wypunktowana treść, stopka z copyrightem i datą). Pierwsza linia wiadomości = tytuł/kategoria
-  nowości (np. "ChestPvP"), reszta linii = punkty zmian (każda linia staje się osobnym • punktem).
+- Nowości: /nowosc otwiera okienko - wpisujesz kategorię/tryb (np. "ChestPvP") i co nowego
+  (każda linia = osobny punkt zmian), bot od razu wysyła gotową kartę ogłoszenia (design jak
+  changelog - kolorowy pasek z boku, tytuł, wypunktowana treść, stopka z copyrightem i datą)
+  na kanał, na którym użyto komendy.
 - Tickety: kategorie (nazwa + opcjonalny formularz pytań) w pełni edytowalne komendą
   /tickety kategorie - interaktywny panel z przyciskami (dodaj/edytuj/usuń).
 - Kolory bocznego paska każdej sekcji (w tym ticketów) zmienisz komendą /konfiguracja kolor.
@@ -75,7 +75,6 @@ DEFAULT_CONFIG = {
         "bledy": 0,
         "powitania": 0,
         "konkursy": 0,
-        "nowosci": 0,
     },
 
     "role": {
@@ -737,56 +736,39 @@ async def obsluz_wiadomosc_ankiety(message: discord.Message):
     save_config()
 
 
-async def obsluz_wiadomosc_nowosci(message: discord.Message):
-    """Dokładnie jak z propozycjami/błędami/ankietami: napisz na wyznaczonym kanale, a bot
-    sam zamieni to w kartę ogłoszenia (design changelogu - kolorowy pasek z boku, tytuł,
-    wypunktowana treść, stopka z copyrightem i datą - dokładnie jak na wzorze).
+class NowoscModal(discord.ui.Modal, title="Nowa aktualizacja / nowość"):
+    """Otwierana komendą /nowosc - dokładnie jak panel propozycji, tylko od razu modal
+    (bez pośredniego panelu z przyciskiem). Wybierasz tryb/kategorię, piszesz co nowego
+    (każda linia = osobny punkt zmian), a bot buduje kartę w stylu ze wzoru (MineStar.GG):
+    kolorowy pasek z boku, tytuł "{tryb} | Nowość", wypunktowana treść w "boksach", stopka
+    z copyrightem, ikonką serwera i datą."""
 
-    Pierwsza linia wiadomości = tytuł/kategoria nowości (np. "ChestPvP"), reszta linii =
-    punkty zmian (każda niepusta linia staje się osobnym punktem "•", chyba że już zaczyna
-    się od •/-/*)."""
-    tresc = message.content.strip()
-    obrazek = znajdz_obrazek(message)
-    if not tresc and not obrazek:
-        try:
-            await message.delete()
-        except (discord.Forbidden, discord.NotFound):
-            pass
-        return
+    tryb = discord.ui.TextInput(label="Kategoria / tryb", max_length=100,
+                                 placeholder="np. ChestPvP")
+    tresc = discord.ui.TextInput(label="Co nowego? (jedna linia = jeden punkt)",
+                                  style=discord.TextStyle.paragraph, max_length=1000,
+                                  placeholder="Dodaliśmy limitowany eliksir plażowicza do wiedźmy\nNaprawiliśmy błąd z...")
 
-    linie_wiad = [l for l in tresc.split("\n")] if tresc else []
-    tytul = linie_wiad[0].strip() if linie_wiad and linie_wiad[0].strip() else "Aktualizacja"
-    reszta = linie_wiad[1:] if len(linie_wiad) > 1 else []
+    async def on_submit(self, interaction: discord.Interaction):
+        kanal = interaction.channel
 
-    punkty = []
-    for linia in reszta:
-        linia = linia.strip()
-        if not linia:
-            continue
-        if linia.startswith(("•", "-", "*")):
-            linia = linia.lstrip("•-* ").strip()
-        punkty.append(f"• `{linia}`")
+        punkty = []
+        for linia in self.tresc.value.split("\n"):
+            linia = linia.strip()
+            if not linia:
+                continue
+            if linia.startswith(("•", "-", "*")):
+                linia = linia.lstrip("•-* ").strip()
+            punkty.append(f"• `{linia}`")
+        opis = "\n\n".join(punkty) if punkty else "*(brak treści)*"
 
-    if punkty:
-        opis = "\n\n".join(punkty)
-    elif obrazek and len(linie_wiad) <= 1:
-        opis = "\u200b"
-    else:
-        opis = "*(brak treści)*"
-
-    try:
-        await message.delete()
-    except (discord.Forbidden, discord.NotFound):
-        pass
-
-    nazwa = CONFIG.get("nazwa_serwera", "Bot")
-    rok = datetime.datetime.now().year
-    ikonka = message.guild.icon.url if message.guild.icon else None
-    embed = karta(f"📦 {tytul} | Nowość", opis, CONFIG["kolory"].get("nowosci", 0x57F287),
-                  stopka=f"© Copyright {nazwa} - {rok}", footer_icon_url=ikonka)
-    if obrazek:
-        embed.set_image(url=obrazek)
-    await message.channel.send(embed=embed)
+        nazwa = CONFIG.get("nazwa_serwera", "Bot")
+        rok = datetime.datetime.now().year
+        ikonka = interaction.guild.icon.url if interaction.guild.icon else None
+        embed = karta(f"📦 {self.tryb.value} | Nowość", opis, CONFIG["kolory"].get("nowosci", 0x57F287),
+                      stopka=f"© Copyright {nazwa} - {rok}", footer_icon_url=ikonka)
+        await kanal.send(embed=embed)
+        await interaction.response.send_message(f"✅ Nowość wysłana na {kanal.mention}!", ephemeral=True)
 
 
 @bot.event
@@ -809,26 +791,13 @@ async def on_message(message: discord.Message):
         await obsluz_wiadomosc_ankiety(message)
         return
 
-    kanal_nowosci = CONFIG["kanaly"].get("nowosci")
-    if kanal_nowosci and message.channel.id == kanal_nowosci:
-        await obsluz_wiadomosc_nowosci(message)
-        return
 
-
-nowosci_group = app_commands.Group(name="nowosci", description="Moduł nowości / aktualizacji")
-
-
-@nowosci_group.command(name="ustawkanal", description="Ustawia kanał nowości (auto-zamiana wiadomości na kartę ogłoszenia)")
-async def nowosci_ustawkanal(interaction: discord.Interaction, kanal: discord.TextChannel):
-    if not is_admin(interaction):
+@bot.tree.command(name="nowosc", description="Otwiera panel do napisania nowości/aktualizacji")
+async def nowosc_cmd(interaction: discord.Interaction):
+    if not is_staff(interaction):
         await interaction.response.send_message("⚠️ Brak uprawnień.", ephemeral=True)
         return
-    CONFIG["kanaly"]["nowosci"] = kanal.id
-    save_config()
-    await interaction.response.send_message(
-        f"✅ Kanał nowości ustawiony na {kanal.mention}. Każda wiadomość napisana tam "
-        "(pierwsza linia = tytuł, reszta = punkty zmian) zamieni się automatycznie w kartę ogłoszenia.",
-        ephemeral=True)
+    await interaction.response.send_modal(NowoscModal())
 
 
 ankieta_group = app_commands.Group(name="ankieta", description="Zarządzanie ankietami")
@@ -1940,11 +1909,10 @@ POMOC_KATEGORIE = {
     "nowosci": {
         "etykieta": "📦 Nowości",
         "tresc": (
-            "`/nowosci ustawkanal <kanal>` — Ustawia kanał nowości. *(Admin)*\n\n"
-            "**Najprościej:** po ustawieniu kanału, każda wiadomość napisana tam (tekst i/lub "
-            "zdjęcie) sama zamieni się w kartę ogłoszenia w stylu changelogu. Pierwsza linia "
-            "wiadomości to tytuł/kategoria nowości (np. „ChestPvP”), a każda kolejna linia staje "
-            "się osobnym punktem zmian (•). Kolor karty zmienisz przez `/konfiguracja kolor`."
+            "`/nowosc` — Otwiera okienko: wpisujesz kategorię/tryb (np. „ChestPvP”) i co nowego "
+            "(każda linia = osobny punkt zmian) - bot od razu wysyła gotową kartę w stylu changelogu "
+            "na kanał, na którym użyto komendy. *(Staff)*\n\n"
+            "Kolor karty zmienisz przez `/konfiguracja kolor`."
         ),
     },
     "bledy": {
@@ -2043,7 +2011,6 @@ async def pomoc_cmd(interaction: discord.Interaction):
 # ========================
 
 bot.tree.add_command(propozycje_group)
-bot.tree.add_command(nowosci_group)
 bot.tree.add_command(bledy_group)
 bot.tree.add_command(centrumpomocy_group)
 bot.tree.add_command(ankieta_group)
