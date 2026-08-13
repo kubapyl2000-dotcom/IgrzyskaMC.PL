@@ -277,13 +277,14 @@ async def wyslij_karte(kanal: discord.abc.Messageable, sekcja: str, opis: str,
     return await kanal.send(view=PanelView(sekcja, opis, typ_koloru, obrazek_url=obrazek_url))
 
 
-def karta(tytul: str, opis: str, kolor: int, stopka: Optional[str] = None) -> discord.Embed:
+def karta(tytul: str, opis: str, kolor: int, stopka: Optional[str] = None,
+          footer_icon_url: Optional[str] = None) -> discord.Embed:
     """Klasyczny embed w stylu 'ogłoszenia/changelogu' (kolorowy pasek z boku, pogrubiony
-    tytuł, stopka z copyrightem i datą) - używany tylko dla modułu Ogłoszeń."""
+    tytuł, stopka z copyrightem, ikonką serwera i datą) - używany tylko dla modułu Nowości."""
     embed = discord.Embed(title=tytul, description=opis, color=kolor)
     nazwa = CONFIG.get("nazwa_serwera", "Bot")
     rok = datetime.datetime.now().year
-    embed.set_footer(text=stopka or f"🎮 Copyright {nazwa} - {rok}")
+    embed.set_footer(text=stopka or f"🎮 Copyright {nazwa} - {rok}", icon_url=footer_icon_url)
     embed.timestamp = datetime.datetime.now(datetime.timezone.utc)
     return embed
 
@@ -764,7 +765,7 @@ async def obsluz_wiadomosc_nowosci(message: discord.Message):
             continue
         if linia.startswith(("•", "-", "*")):
             linia = linia.lstrip("•-* ").strip()
-        punkty.append(f"• {linia}")
+        punkty.append(f"• `{linia}`")
 
     if punkty:
         opis = "\n\n".join(punkty)
@@ -780,8 +781,9 @@ async def obsluz_wiadomosc_nowosci(message: discord.Message):
 
     nazwa = CONFIG.get("nazwa_serwera", "Bot")
     rok = datetime.datetime.now().year
+    ikonka = message.guild.icon.url if message.guild.icon else None
     embed = karta(f"📦 {tytul} | Nowość", opis, CONFIG["kolory"].get("nowosci", 0x57F287),
-                  stopka=f"© Copyright {nazwa} - {rok}")
+                  stopka=f"© Copyright {nazwa} - {rok}", footer_icon_url=ikonka)
     if obrazek:
         embed.set_image(url=obrazek)
     await message.channel.send(embed=embed)
