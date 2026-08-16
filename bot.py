@@ -1000,10 +1000,13 @@ async def cp_zasady(interaction: discord.Interaction, godziny: str = "14.00-23.0
 #   Discorda). Zarządza się nimi przez /tickety kategorie (panel z przyciskami).
 # ========================
 
-def _limit_kategorii(gildia: discord.Guild, autor_id: int) -> Optional[discord.TextChannel]:
-    """Sprawdza, czy dany użytkownik ma już otwarty (niezamknięty) ticket."""
+def _limit_kategorii(gildia: discord.Guild, autor_id: int, klucz_kategorii: str) -> Optional[discord.TextChannel]:
+    """Sprawdza, czy dany użytkownik ma już otwarty (niezamknięty) ticket W TEJ SAMEJ kategorii
+    (klucz_kategorii). Można mieć naraz otwarte kilka różnych tematycznie ticketów (np. jeden
+    "Pomoc techniczna" i jeden "Odbiór nagrody"), ale nie dwa z tej samej kategorii naraz."""
     for numer, wpis in CONFIG["tickety_dane"].items():
-        if wpis.get("autor_id") == autor_id and not wpis.get("zamkniety"):
+        if (wpis.get("autor_id") == autor_id and not wpis.get("zamkniety")
+                and wpis.get("kategoria_klucz") == klucz_kategorii):
             kanal = gildia.get_channel(wpis.get("kanal_id"))
             if kanal:
                 return kanal
@@ -1082,7 +1085,7 @@ async def _utworz_kanal_ticketu(gildia: discord.Guild, autor: discord.abc.User, 
       - (nowy_kanal, True)        - utworzono nowy kanał ticketu
       - (None, False)             - bot nie ma uprawnień do utworzenia kanału
     """
-    istniejacy = _limit_kategorii(gildia, autor.id)
+    istniejacy = _limit_kategorii(gildia, autor.id, klucz)
     if istniejacy:
         return istniejacy, False
 
@@ -1103,9 +1106,17 @@ async def _utworz_kanal_ticketu(gildia: discord.Guild, autor: discord.abc.User, 
         przeciazenia[staff_rola] = discord.PermissionOverwrite(view_channel=True, send_messages=True,
                                                                 attach_files=True, read_message_history=True)
 
+    # Tickety odbioru nagrody nazywają się "claim-nazwaużytkownika" (łatwo rozpoznać o co chodzi
+    # na liście kanałów) - reszta ticketów zostaje przy numerkach "ticket-N".
+    nazwa_uzytkownika = re.sub(r"[^a-z0-9-]", "", autor.name.lower().replace(" ", "-"))[:80] or str(autor.id)
+    if klucz == "odbior_nagrody":
+        nazwa_kanalu = f"claim-{nazwa_uzytkownika}"
+    else:
+        nazwa_kanalu = f"ticket-{numer}"
+
     try:
         kanal = await gildia.create_text_channel(
-            name=f"ticket-{numer}", category=kategoria_obiekt, overwrites=przeciazenia,
+            name=nazwa_kanalu, category=kategoria_obiekt, overwrites=przeciazenia,
             topic=f"Ticket #{numer} • {etykieta} • Właściciel: {autor.id}",
         )
     except discord.Forbidden:
@@ -1119,11 +1130,18 @@ async def _utworz_kanal_ticketu(gildia: discord.Guild, autor: discord.abc.User, 
 
     widok = build_ticket_panel(numer, etykieta, autor.id, odpowiedzi=odpowiedzi)
     # Rola Staff jest pingowana TYLKO jeśli została do tego wyznaczona (/konfiguracja rola).
+    # UWAGA: content i view (Components V2 - Container/TextDisplay) NIE MOGĄ być wysłane w tej
+    # samej wiadomości - Discord odrzuca całą wiadomość, przez co ticket zostawał pusty (bez
+    # panelu i bez przycisku "Zamknij ticket"). Dlatego ping wysyłamy osobno, przed panelem.
     tresc_pingow = autor.mention
     if staff_rola:
         tresc_pingow += f" {staff_rola.mention}"
-    await kanal.send(content=tresc_pingow, view=widok,
-                      allowed_mentions=discord.AllowedMentions(everyone=False, roles=True, users=True))
+    try:
+        await kanal.send(content=tresc_pingow,
+                          allowed_mentions=discord.AllowedMentions(everyone=False, roles=True, users=True))
+        await kanal.send(view=widok)
+    except discord.HTTPException as e:
+        print(f"⚠️ Błąd przy wysyłaniu panelu ticketu #{numer}: {e}")
     bot.add_view(widok)
 
     return kanal, True
@@ -1139,7 +1157,7 @@ async def utworz_ticket(interaction: discord.Interaction, klucz: str, etykieta: 
         await interaction.response.send_message("⚠️ Bot nie ma uprawnień do tworzenia kanałów.", ephemeral=True)
         return
 
-    tresc = f"✅ Utworzono ticket: {kanal.mention}" if nowy else f"⚠️ Masz już otwarty ticket: {kanal.mention}"
+    tresc = f"✅ Utworzono ticket: {kanal.mention}" if nowy else f"⚠️ Masz już otwarty ticket w tej kategorii: {kanal.mention}"
     if interaction.response.is_done():
         await interaction.followup.send(tresc, ephemeral=True)
     else:
@@ -1173,7 +1191,7 @@ class DynamicTicketModal(discord.ui.Modal):
 class TicketySelect(discord.ui.Select):
     def __init__(self):
         kategorie = CONFIG["ticket_kategorie"]
-        opcje = [discord.SelectOption(label=dane["etykieta"][:100], value=klucz, emoji="🎫")
+        opcje = [discord.SelectOption(label=dane["etykieta"][:100], value=klucz)
                  for klucz, dane in list(kategorie.items())[:25]]
         if not opcje:
             opcje = [discord.SelectOption(label="Brak kategorii - skonfiguruj /tickety kategorie", value="brak")]
@@ -1483,7 +1501,10 @@ async def on_member_join(member: discord.Member):
     obrazek = CONFIG["obrazki"].get("powitanie") or None
     view = PanelView("Powitanie", tresc, "powitanie", obrazek_url=obrazek)
     try:
-        await kanal.send(content=member.mention, view=view)
+        # content i view (Components V2) nie mogą być w tej samej wiadomości - patrz komentarz
+        # w _utworz_kanal_ticketu.
+        await kanal.send(content=member.mention)
+        await kanal.send(view=view)
     except (discord.Forbidden, discord.HTTPException):
         pass
 
