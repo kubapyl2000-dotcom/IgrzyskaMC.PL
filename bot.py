@@ -1071,14 +1071,20 @@ def build_ticket_panel(numer: str, kategoria: str, autor_id: int, zamkniety: boo
                       items=[ZamknijTicketButton(numer, disabled=zamkniety)])
 
 
-async def utworz_ticket(interaction: discord.Interaction, klucz: str, etykieta: str,
-                         odpowiedzi: Optional[dict] = None):
-    gildia = interaction.guild
+async def _utworz_kanal_ticketu(gildia: discord.Guild, autor: discord.abc.User, klucz: str, etykieta: str,
+                                 odpowiedzi: Optional[dict] = None):
+    """Silnik tworzenia ticketu - NIE zależy od interaction, dzięki czemu może być wywoływany
+    zarówno w odpowiedzi na kliknięcie/wypełnienie formularza (patrz utworz_ticket), jak i
+    automatycznie przez bota (np. dla zwycięzcy konkursu, bez żadnego klikania).
 
-    istniejacy = _limit_kategorii(gildia, interaction.user.id)
+    Zwraca (kanal, nowy):
+      - (istniejący_kanal, False) - użytkownik miał już otwarty ticket, nic nowego nie tworzymy
+      - (nowy_kanal, True)        - utworzono nowy kanał ticketu
+      - (None, False)             - bot nie ma uprawnień do utworzenia kanału
+    """
+    istniejacy = _limit_kategorii(gildia, autor.id)
     if istniejacy:
-        await interaction.response.send_message(f"⚠️ Masz już otwarty ticket: {istniejacy.mention}", ephemeral=True)
-        return
+        return istniejacy, False
 
     numer = nastepne_id("ticket")
 
@@ -1087,47 +1093,57 @@ async def utworz_ticket(interaction: discord.Interaction, klucz: str, etykieta: 
 
     przeciazenia = {
         gildia.default_role: discord.PermissionOverwrite(view_channel=False),
-        interaction.user: discord.PermissionOverwrite(view_channel=True, send_messages=True,
-                                                        attach_files=True, read_message_history=True),
+        autor: discord.PermissionOverwrite(view_channel=True, send_messages=True,
+                                            attach_files=True, read_message_history=True),
         gildia.me: discord.PermissionOverwrite(view_channel=True, send_messages=True),
     }
     staff_id = CONFIG["role"].get("staff")
-    if staff_id:
-        staff_rola = gildia.get_role(staff_id)
-        if staff_rola:
-            przeciazenia[staff_rola] = discord.PermissionOverwrite(view_channel=True, send_messages=True,
-                                                                    attach_files=True, read_message_history=True)
+    staff_rola = gildia.get_role(staff_id) if staff_id else None
+    if staff_rola:
+        przeciazenia[staff_rola] = discord.PermissionOverwrite(view_channel=True, send_messages=True,
+                                                                attach_files=True, read_message_history=True)
 
     try:
         kanal = await gildia.create_text_channel(
             name=f"ticket-{numer}", category=kategoria_obiekt, overwrites=przeciazenia,
-            topic=f"Ticket #{numer} • {etykieta} • Właściciel: {interaction.user.id}",
+            topic=f"Ticket #{numer} • {etykieta} • Właściciel: {autor.id}",
         )
     except discord.Forbidden:
-        await interaction.response.send_message("⚠️ Bot nie ma uprawnień do tworzenia kanałów.", ephemeral=True)
-        return
+        return None, False
 
     CONFIG["tickety_dane"][numer] = {
-        "autor_id": interaction.user.id, "kategoria": etykieta, "kategoria_klucz": klucz,
+        "autor_id": autor.id, "kategoria": etykieta, "kategoria_klucz": klucz,
         "kanal_id": kanal.id, "zamkniety": False, "odpowiedzi": odpowiedzi or {},
     }
     save_config()
 
-    widok = build_ticket_panel(numer, etykieta, interaction.user.id, odpowiedzi=odpowiedzi)
-    tresc_pingow = interaction.user.mention
-    staff_id = CONFIG["role"].get("staff")
-    if staff_id:
-        staff_rola = gildia.get_role(staff_id)
-        if staff_rola:
-            tresc_pingow += f" {staff_rola.mention}"
+    widok = build_ticket_panel(numer, etykieta, autor.id, odpowiedzi=odpowiedzi)
+    # Rola Staff jest pingowana TYLKO jeśli została do tego wyznaczona (/konfiguracja rola).
+    tresc_pingow = autor.mention
+    if staff_rola:
+        tresc_pingow += f" {staff_rola.mention}"
     await kanal.send(content=tresc_pingow, view=widok,
                       allowed_mentions=discord.AllowedMentions(everyone=False, roles=True, users=True))
     bot.add_view(widok)
 
+    return kanal, True
+
+
+async def utworz_ticket(interaction: discord.Interaction, klucz: str, etykieta: str,
+                         odpowiedzi: Optional[dict] = None):
+    """Wrapper na _utworz_kanal_ticketu używany tam, gdzie ticket powstaje w reakcji na
+    interakcję użytkownika (wybór kategorii z menu, wypełnienie formularza, przycisk)."""
+    kanal, nowy = await _utworz_kanal_ticketu(interaction.guild, interaction.user, klucz, etykieta, odpowiedzi)
+
+    if kanal is None:
+        await interaction.response.send_message("⚠️ Bot nie ma uprawnień do tworzenia kanałów.", ephemeral=True)
+        return
+
+    tresc = f"✅ Utworzono ticket: {kanal.mention}" if nowy else f"⚠️ Masz już otwarty ticket: {kanal.mention}"
     if interaction.response.is_done():
-        await interaction.followup.send(f"✅ Utworzono ticket: {kanal.mention}", ephemeral=True)
+        await interaction.followup.send(tresc, ephemeral=True)
     else:
-        await interaction.response.send_message(f"✅ Utworzono ticket: {kanal.mention}", ephemeral=True)
+        await interaction.response.send_message(tresc, ephemeral=True)
 
 
 class DynamicTicketModal(discord.ui.Modal):
@@ -1529,10 +1545,12 @@ class UczestnicyKonkursButton(discord.ui.Button):
 
 class OdbierzNagrodeButton(discord.ui.Button):
     """Przycisk widoczny po zakończeniu konkursu - klikalny WYŁĄCZNIE przez zwycięzcę(ów).
-    Tworzy dla niego prywatny ticket, w którym może odebrać nagrodę pisząc do administracji."""
+    Ticket do odbioru nagrody otwiera się AUTOMATYCZNIE zaraz po losowaniu (patrz
+    automatyczny_ticket_zwyciezcy), więc ten przycisk jest tylko zapasową opcją - na wypadek,
+    gdyby zwycięzca nie zauważył nowego kanału albo automatyczne utworzenie się nie powiodło."""
 
     def __init__(self, konkurs_id: str):
-        super().__init__(label="Odbierz nagrodę", emoji="🎁", style=discord.ButtonStyle.success,
+        super().__init__(label="Otwórz ticket z nagrodą", emoji="🎁", style=discord.ButtonStyle.success,
                           custom_id=f"igrzyskamc:konkurs:odbierz:{konkurs_id}")
         self.konkurs_id = konkurs_id
 
@@ -1574,7 +1592,8 @@ def build_konkurs_panel(konkurs_id: str) -> PanelView:
         if zwyciezcy:
             wzmianki = ", ".join(f"<@{uid}>" for uid in zwyciezcy)
             linie.append(f"\n🏆 **Zwycięzca(y):** {wzmianki}")
-            linie.append("» Zwycięzco, kliknij **🎁 Odbierz nagrodę** niżej, aby otworzyć ticket do administracji!")
+            linie.append("» Zwycięzco, sprawdź swoje kanały - otworzyliśmy dla Ciebie prywatny **ticket** "
+                          "do odbioru nagrody! Jeśli go nie widzisz, kliknij przycisk niżej.")
         else:
             linie.append("\n🏆 **Zwycięzcy:** Brak (za mało uczestników).")
 
@@ -1597,6 +1616,24 @@ async def wylosuj_zwyciezcow(wpis: dict) -> List[int]:
     return random.sample(uczestnicy, ile)
 
 
+async def automatyczny_ticket_zwyciezcy(guild: discord.Guild, user_id: int, konkurs_id: str, nagroda: str) -> Optional[discord.TextChannel]:
+    """Automatycznie (bez żadnego klikania) otwiera prywatny ticket zwycięzcy do odbioru nagrody,
+    zaraz po zakończeniu losowania - pinguje w nim zwycięzcę oraz rolę Staff (jeśli jest ustawiona).
+    Jeśli zwycięzca opuścił serwer albo ma już otwarty inny ticket, funkcja po prostu nic nie robi
+    / zwraca istniejący kanał (przycisk 🎁 na panelu konkursu zostaje jako opcja zapasowa)."""
+    try:
+        czlonek = guild.get_member(user_id) or await guild.fetch_member(user_id)
+    except discord.HTTPException:
+        return None
+
+    etykieta = f"🎁 Odbiór nagrody — konkurs #{konkurs_id}"
+    kanal, _ = await _utworz_kanal_ticketu(
+        guild, czlonek, "odbior_nagrody", etykieta,
+        odpowiedzi={"Nagroda": nagroda, "Konkurs": f"#{konkurs_id}"},
+    )
+    return kanal
+
+
 async def zakoncz_konkurs(bot_instance: commands.Bot, konkurs_id: str, reroll: bool = False):
     wpis = konkurs_wpis(konkurs_id)
     if not wpis:
@@ -1609,22 +1646,19 @@ async def zakoncz_konkurs(bot_instance: commands.Bot, konkurs_id: str, reroll: b
 
     kanal = bot_instance.get_channel(wpis["kanal_id"])
     if kanal:
+        # Edytujemy panel konkursu na miejscu - to JEDYNE miejsce, w którym pojawia się info
+        # o zwycięzcach (bez wysyłania osobnej, duplikującej wiadomości z wynikami).
         try:
             wiadomosc = await kanal.fetch_message(wpis["message_id"])
             await wiadomosc.edit(view=build_konkurs_panel(konkurs_id))
         except (discord.NotFound, discord.Forbidden, discord.HTTPException):
             pass
 
-        if zwyciezcy:
-            wzmianki = ", ".join(f"<@{uid}>" for uid in zwyciezcy)
-            naglowek = "🔄 Wylosowano ponownie" if reroll else "🎊 Konkurs zakończony"
-            tresc = (f"» **{naglowek}!** Gratulacje {wzmianki} — wygrywasz(cie) **{wpis['nagroda']}**!\n"
-                     f"» Skontaktuj się z organizatorem <@{wpis['host_id']}>, aby odebrać nagrodę.")
-            await wyslij_karte(kanal, "Konkurs — Wyniki", tresc, "konkursy")
-        else:
-            await wyslij_karte(kanal, "Konkurs — Wyniki",
-                                f"» Konkurs na **{wpis['nagroda']}** zakończył się bez zwycięzców "
-                                f"— za mało uczestników.", "bledy")
+        # Każdemu zwycięzcy automatycznie (bez klikania czegokolwiek) otwieramy prywatny ticket
+        # do odbioru nagrody - to on pełni rolę powiadomienia i pinguje administrację.
+        for uid in zwyciezcy:
+            await automatyczny_ticket_zwyciezcy(kanal.guild, uid, konkurs_id, wpis["nagroda"])
+
     return zwyciezcy
 
 
