@@ -92,6 +92,15 @@ DEFAULT_CONFIG = {
         "» Jesteś naszym **{ilosc}** członkiem na serwerze."
     ),
 
+    # Tekst z zasadami/informacjami wyświetlany w KAŻDYM tickecie (pod danymi z formularza,
+    # jeśli kategoria go ma). Możesz użyć {rola} - zamieni się na wzmiankę roli Staff
+    # (albo na słowo "administracji", jeśli rola Staff nie jest jeszcze ustawiona).
+    "ticket_zasady_tekst": (
+        "**Cierpliwość:** Prosimy cierpliwie poczekać na {rola}! Nie tylko Ty czekasz na pomoc. "
+        "Maksymalny czas oczekiwania na sprawdzenie zgłoszenia to **24h**.\n"
+        "**Nie oznaczaj** {rola} więcej niż raz - zbyt wiele oznaczeń może skutkować ograniczeniem uprawnień."
+    ),
+
     # Kategorie ticketów - każda ma etykietę (widoczną w menu) i opcjonalną listę pytań
     # formularza (max 5, limit Discorda). Jeśli "pytania" jest puste, ticket tworzy się
     # od razu po wybraniu kategorii (bez okienka).
@@ -174,6 +183,13 @@ def is_staff(interaction: discord.Interaction) -> bool:
         if rola and rola in interaction.user.roles:
             return True
     return False
+
+
+def staff_wzmianka() -> str:
+    """Zwraca wzmiankę roli Staff (do wstawienia w miejsce {rola} w tekście zasad ticketu),
+    albo słowo 'administracji', jeśli rola Staff nie jest jeszcze skonfigurowana."""
+    rola_id = CONFIG["role"].get("staff")
+    return f"<@&{rola_id}>" if rola_id else "administracji"
 
 
 def nastepne_id(klucz: str) -> str:
@@ -1044,6 +1060,12 @@ def build_ticket_panel(numer: str, kategoria: str, autor_id: int, zamkniety: boo
         linie.append("**Odpowiedzi z formularza:**")
         for pytanie, odp in odpowiedzi.items():
             linie.append(f"• **{pytanie}:** {odp or '*brak odpowiedzi*'}")
+
+    zasady = CONFIG.get("ticket_zasady_tekst", "").strip()
+    if zasady:
+        linie.append("")
+        linie.append(zasady.format_map(SafeDict(rola=staff_wzmianka())))
+
     opis = "\n".join(linie)
     return PanelView(f"Ticket #{numer} — {kategoria}", opis, "tickety",
                       items=[ZamknijTicketButton(numer, disabled=zamkniety)])
@@ -1846,6 +1868,47 @@ async def konfig_obrazek(interaction: discord.Interaction, typ: app_commands.Cho
     await interaction.response.send_message(f"✅ Obrazek sekcji **{typ.name}** zaktualizowany.", ephemeral=True)
 
 
+class ZasadyTicketowModal(discord.ui.Modal, title="Zasady / informacje w tickecie"):
+    def __init__(self):
+        super().__init__()
+        self.tresc = discord.ui.TextInput(
+            label="Treść (dostępne: {rola})",
+            style=discord.TextStyle.paragraph,
+            default=CONFIG.get("ticket_zasady_tekst", "")[:4000],
+            max_length=4000,
+            required=False,
+            placeholder="np. Prosimy cierpliwie poczekać na {rola} - maks. 24h. Nie oznaczaj {rola} więcej niż raz.",
+        )
+        self.add_item(self.tresc)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        CONFIG["ticket_zasady_tekst"] = str(self.tresc.value)
+        save_config()
+        await interaction.response.send_message(
+            "✅ Zaktualizowano zasady wyświetlane w tickecie (dotyczy nowo otwieranych ticketów).", ephemeral=True)
+
+
+@konfiguracja_group.command(name="zasady-ticketow", description="Podgląd lub edycja zasad/informacji wyświetlanych w każdym tickecie (np. o czasie oczekiwania)")
+@app_commands.describe(akcja="Co chcesz zrobić")
+@app_commands.choices(akcja=[
+    app_commands.Choice(name="👀 Podgląd", value="podglad"),
+    app_commands.Choice(name="✏️ Edytuj", value="edytuj"),
+])
+async def konfig_zasady_ticketow(interaction: discord.Interaction, akcja: Optional[app_commands.Choice[str]] = None):
+    if not is_admin(interaction):
+        await interaction.response.send_message("⚠️ Brak uprawnień.", ephemeral=True)
+        return
+
+    wartosc = akcja.value if akcja else "podglad"
+    if wartosc == "edytuj":
+        await interaction.response.send_modal(ZasadyTicketowModal())
+        return
+
+    tresc = CONFIG.get("ticket_zasady_tekst", "").strip()
+    opis = tresc.format_map(SafeDict(rola=staff_wzmianka())) if tresc else "*(brak ustawionej treści - tickety nie pokażą sekcji zasad)*"
+    await interaction.response.send_message(view=PanelView("Podgląd zasad ticketów", opis, "tickety"), ephemeral=True)
+
+
 @konfiguracja_group.command(name="powitanie", description="Ustawia treść wiadomości powitalnej (możesz użyć {mention} i {ilosc})")
 async def konfig_powitanie(interaction: discord.Interaction, tresc: str):
     if not is_admin(interaction):
@@ -1875,10 +1938,13 @@ POMOC_KATEGORIE = {
         "tresc": (
             "`/tickety panel [kanal]` — Wysyła panel z wyborem kategorii ticketu. *(Admin)*\n"
             "`/tickety kategorie` — Otwiera interaktywny panel do zarządzania kategoriami "
-            "(dodawanie/usuwanie kategorii, zmiana nazwy, formularz pytań przed utworzeniem ticketu). *(Admin)*\n\n"
+            "(dodawanie/usuwanie kategorii, zmiana nazwy, formularz pytań przed utworzeniem ticketu). *(Admin)*\n"
+            "`/konfiguracja zasady-ticketow` — Podgląd / edycja tekstu z zasadami (np. o czasie "
+            "oczekiwania na administrację), wyświetlanego w KAŻDYM tickecie. *(Admin)*\n\n"
             "Ticket tworzy się automatycznie po wybraniu kategorii przez gracza (lub po wypełnieniu "
             "formularza, jeśli kategoria go ma) — prywatny kanał widoczny tylko dla autora i roli Staff. "
-            "Można w nim swobodnie wysyłać zdjęcia.\n\n"
+            "Można w nim swobodnie wysyłać zdjęcia. Autor i rola Staff (jeśli ustawiona) są automatycznie "
+            "pingowani przy tworzeniu ticketu — dotyczy to również ticketu odbioru nagrody z konkursu.\n\n"
             "Przycisk **🔒 Zamknij ticket** zapisuje transkrypt (jeśli ustawiono kanał logów) i "
             "usuwa kanał po 5 sekundach."
         ),
@@ -1943,7 +2009,9 @@ POMOC_KATEGORIE = {
             "`/konkurs usun <id>` — Usuwa konkurs bez losowania. *(Staff)*\n"
             "`/konkurs lista` — Wyświetla listę aktywnych konkursów.\n\n"
             "Po zakończeniu konkursu przycisk zmienia się w **🎁 Odbierz nagrodę** - działa "
-            "wyłącznie dla zwycięzcy(ów) i od razu tworzy dla niego prywatny ticket do odbioru nagrody."
+            "wyłącznie dla zwycięzcy(ów) i od razu tworzy dla niego prywatny ticket do odbioru nagrody "
+            "(z automatycznym pingiem roli Staff, jeśli jest ustawiona, oraz tekstem zasad z "
+            "`/konfiguracja zasady-ticketow`, np. o 24h czasu oczekiwania)."
         ),
     },
     "powitania": {
